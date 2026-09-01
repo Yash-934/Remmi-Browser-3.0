@@ -22,6 +22,15 @@ enum class ReportType {
   ABNORMAL_TERMINATION
 }
 
+enum class ProcessExitClassification {
+  USER_REQUESTED_TERMINATION,
+  NATIVE_FATAL_SIGNAL,
+  SYSTEM_KILL,
+  OOM,
+  ANR,
+  UNKNOWN
+}
+
 enum class StartupPhase(val id: String) {
   PROCESS_START("PROCESS_START"),
   SQLCIPHER_LOAD_START("SQLCIPHER_LOAD_START"),
@@ -155,7 +164,7 @@ object CrashHandlerHelper {
   }
 
   /**
-   * Updates startup phase checkpoint synchronously to ensure crash journal is always up to date.
+   * Updates startup phase checkpoint. In-memory immediately, persisted asynchronously.
    * When APP_READY is reached, marks the run clean.
    */
   fun updateStartupPhase(context: Context? = null, phase: StartupPhase) {
@@ -170,19 +179,18 @@ object CrashHandlerHelper {
           editor.putBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
           editor.putLong(KEY_LAST_CLEAN_TIMESTAMP, System.currentTimeMillis())
         }
-        editor.commit()
+        editor.apply()
       }
 
       DebugLogManager.log("[APP_LIFECYCLE] ${phase.id}")
-      DebugLogManager.flushSynchronously()
     } catch (e: Throwable) {
       Log.e(TAG, "Error updating startup phase: ${e.message}", e)
     }
   }
 
   /**
-   * Synchronously records a native operation marker into persistent preferences and the debug journal.
-   * Ensures that if an uncatchable native process crash/abort occurs, the exact operation is captured.
+   * Records a native operation marker into persistent preferences and the debug journal.
+   * In-memory immediately, persisted asynchronously.
    */
   fun recordNativeOp(
     context: Context? = null,
@@ -200,11 +208,10 @@ object CrashHandlerHelper {
         if (apiVersion != null) editor.putString(KEY_NATIVE_API_VERSION, apiVersion)
         if (buildId != null) editor.putString(KEY_NATIVE_BUILD_ID, buildId)
         if (abi != null) editor.putString(KEY_NATIVE_ABI, abi)
-        editor.commit()
+        editor.apply()
       }
 
       DebugLogManager.log("[NATIVE_OP] $op")
-      DebugLogManager.flushSynchronously()
     } catch (e: Throwable) {
       Log.e(TAG, "Error recording native op: ${e.message}", e)
     }
@@ -459,6 +466,100 @@ object CrashHandlerHelper {
     return resultPath
   }
 
+  data class NativeExitInfo(
+    val classification: ProcessExitClassification,
+    val signalName: String,
+    val signalCode: Int,
+    val description: String,
+    val traceBacktrace: String?,
+    val isOom: Boolean,
+    val isAnr: Boolean
+  )
+
+  fun queryHistoricalProcessExit(context: Context): NativeExitInfo? {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      try {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return null
+        val exitList = am.getHistoricalProcessExitReasons(context.packageName, 0, 1)
+        val latest = exitList.firstOrNull() ?: return null
+
+        val reasonStr = when (latest.reason) {
+          android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
+          android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH_JAVA"
+          android.app.ApplicationExitInfo.REASON_ANR -> "ANR"
+          android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "OOM_LOW_MEMORY"
+          android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
+          android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
+          android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
+          android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
+          android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCE_USAGE"
+          android.app.ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
+          else -> "REASON_${latest.reason}"
+        }
+
+        val signalName = when (latest.status) {
+          11 -> "SIGSEGV (Segmentation Fault)"
+          6 -> "SIGABRT (Abort)"
+          7 -> "SIGBUS (Bus Error)"
+          4 -> "SIGILL (Illegal Instruction)"
+          8 -> "SIGFPE (Floating Point Exception)"
+          9 -> "SIGKILL (Killed by OS)"
+          15 -> "SIGTERM (Termination Request)"
+          else -> if (latest.reason == android.app.ApplicationExitInfo.REASON_LOW_MEMORY) "OOM (Low Memory Killer)" else if (latest.reason == android.app.ApplicationExitInfo.REASON_ANR) "ANR (Application Not Responding)" else "STATUS_${latest.status}"
+        }
+
+        val classification = when (latest.reason) {
+          android.app.ApplicationExitInfo.REASON_USER_REQUESTED,
+          android.app.ApplicationExitInfo.REASON_USER_STOPPED,
+          android.app.ApplicationExitInfo.REASON_EXIT_SELF -> ProcessExitClassification.USER_REQUESTED_TERMINATION
+
+          android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> {
+            if (latest.status in listOf(4, 6, 7, 8, 11) || latest.status > 0) {
+              ProcessExitClassification.NATIVE_FATAL_SIGNAL
+            } else {
+              ProcessExitClassification.UNKNOWN
+            }
+          }
+
+          android.app.ApplicationExitInfo.REASON_SIGNALED -> {
+            when (latest.status) {
+              4, 6, 7, 8, 11 -> ProcessExitClassification.NATIVE_FATAL_SIGNAL
+              9, 15 -> ProcessExitClassification.SYSTEM_KILL
+              else -> ProcessExitClassification.UNKNOWN
+            }
+          }
+
+          android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> ProcessExitClassification.OOM
+          android.app.ApplicationExitInfo.REASON_ANR -> ProcessExitClassification.ANR
+          android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE,
+          android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED,
+          android.app.ApplicationExitInfo.REASON_OTHER -> ProcessExitClassification.SYSTEM_KILL
+          else -> ProcessExitClassification.UNKNOWN
+        }
+
+        var traceText: String? = null
+        try {
+          latest.traceInputStream?.use { stream ->
+            traceText = stream.bufferedReader().use { it.readText() }
+          }
+        } catch (_: Throwable) {}
+
+        return NativeExitInfo(
+          classification = classification,
+          signalName = signalName,
+          signalCode = latest.status,
+          description = "${latest.description ?: reasonStr} (PID: ${latest.pid}, importance: ${latest.importance})",
+          traceBacktrace = traceText?.takeIf { it.isNotBlank() },
+          isOom = latest.reason == android.app.ApplicationExitInfo.REASON_LOW_MEMORY,
+          isAnr = latest.reason == android.app.ApplicationExitInfo.REASON_ANR
+        )
+      } catch (t: Throwable) {
+        Log.w(TAG, "Could not query ApplicationExitInfo: ${t.message}")
+      }
+    }
+    return null
+  }
+
   fun buildDiagnosticReport(
     context: Context,
     reportType: ReportType,
@@ -547,6 +648,12 @@ object CrashHandlerHelper {
       ""
     }
 
+    val nativeExitInfo = if (throwable == null) queryHistoricalProcessExit(context) else null
+    val classification = nativeExitInfo?.classification ?: ProcessExitClassification.UNKNOWN
+    val detectedSignal = nativeExitInfo?.signalName ?: "UNKNOWN"
+    val exitDetails = nativeExitInfo?.description ?: "No historical exit info recorded"
+    val backtraceText = nativeExitInfo?.traceBacktrace ?: "Tombstone / Native Backtrace: UNAVAILABLE (No trace stream provided by OS)"
+
     return """
 ======================================================================
 REMMI BROWSER - AUTOMATIC DIAGNOSTIC REPORT
@@ -554,6 +661,9 @@ REMMI BROWSER - AUTOMATIC DIAGNOSTIC REPORT
 
 Report Type:
 ${reportType.name}
+
+Exit Classification:
+${if (throwable != null) "JAVA_CRASH" else classification.name}
 
 Timestamp: $now
 APK version: $versionName ($versionCode)
@@ -571,6 +681,7 @@ Supported ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")}
 
 PROCESS:
 Process ID: ${android.os.Process.myPid()}
+Exit Classification: ${if (throwable != null) "JAVA_CRASH" else classification.name}
 Thread if available: ${thread?.let { "${it.name} (ID: ${it.id})" } ?: "N/A (Process-level termination)"}
 
 STARTUP STATE:
@@ -611,12 +722,14 @@ Stacktrace:
 $stackTrace
 """.trimIndent() else "N/A"}
 
-NATIVE CRASH:
+NATIVE CRASH FORENSICS:
 ${if (throwable == null) """
-NATIVE_PROCESS_TERMINATION_SUSPECTED
+Classification: ${classification.name}
+Signal: $detectedSignal
+Exit Details: $exitDetails
 Last native operation: $displayLastNativeOp
 NO JAVA EXCEPTION CAPTURED.
-Process ended before the Java crash handler could execute or the process was terminated externally.
+$backtraceText
 """.trimIndent() else "N/A (Captured by Java UncaughtExceptionHandler)"}
 
 END REPORT

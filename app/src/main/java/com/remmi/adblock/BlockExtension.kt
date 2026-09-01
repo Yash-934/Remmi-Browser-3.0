@@ -1,5 +1,7 @@
 package com.remmi.adblock
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +14,7 @@ import org.mozilla.geckoview.WebExtension
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.Executors
 
 /**
  * Native Messaging Delegate for Remmi GeckoView WebExtension.
@@ -91,6 +94,12 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
   private val portLock = Any()
   private val activePortGeneration = java.util.concurrent.atomic.AtomicLong(1)
   private val portInstanceCount = java.util.concurrent.atomic.AtomicInteger(0)
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private val decisionExecutor = Executors.newFixedThreadPool(4) { r ->
+    Thread(r, "AdblockDecisionWorker").apply {
+      priority = Thread.NORM_PRIORITY
+    }
+  }
 
   fun setExtensionRegistered() {
     if (_extensionState.value == ExtensionState.NOT_REGISTERED) {
@@ -495,55 +504,67 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 Log.d(TAG, "[NM_NATIVE_HANDLER_START] requestId=$requestId")
               }
 
-              val sourceHost = try {
-                if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
-              } catch (_: Exception) { null }
-              val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
+              // Offload heavy Rust/JNI evaluation to bounded background CPU executor
+              decisionExecutor.execute {
+                val sourceHost = try {
+                  if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
+                } catch (_: Exception) { null }
+                val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
 
-              val decision = if (bypass) {
-                BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
-              } else {
-                adblockBridge.evaluateDecision(
-                  url = url,
-                  sourceUrl = sourceUrl,
-                  initiator = initiator,
-                  method = method,
-                  resourceType = resourceType,
-                  aggressive = aggressive,
-                  thirdParty = thirdParty,
-                  requestId = requestId
-                )
-              }
-              val endTs = System.currentTimeMillis()
+                val decision = if (bypass) {
+                  BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
+                } else {
+                  adblockBridge.evaluateDecision(
+                    url = url,
+                    sourceUrl = sourceUrl,
+                    initiator = initiator,
+                    method = method,
+                    resourceType = resourceType,
+                    aggressive = aggressive,
+                    thirdParty = thirdParty,
+                    requestId = requestId
+                  )
+                }
+                val endTs = System.currentTimeMillis()
 
-              val resp = JSONObject().apply {
-                put("type", "SHOULD_BLOCK_RESULT")
-                put("ok", true)
-                put("cancel", decision.blocked)
-                if (decision.ruleId != null) put("ruleId", decision.ruleId)
-                if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
-                put("generation", decision.engineGeneration)
-                put("requestId", requestId)
-                put("portGeneration", reqPortGen)
-                put("jsInstanceId", jsInstanceId)
-                put("instanceId", instId)
-                put("nativeStartTimestamp", startTs)
-                put("nativeEndTimestamp", endTs)
-                put("responseDeliveryTimestamp", System.currentTimeMillis())
-              }
+                val resp = JSONObject().apply {
+                  put("type", "SHOULD_BLOCK_RESULT")
+                  put("ok", true)
+                  put("cancel", decision.blocked)
+                  if (decision.ruleId != null) put("ruleId", decision.ruleId)
+                  if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
+                  put("generation", decision.engineGeneration)
+                  put("requestId", requestId)
+                  put("portGeneration", reqPortGen)
+                  put("jsInstanceId", jsInstanceId)
+                  put("instanceId", instId)
+                  put("nativeStartTimestamp", startTs)
+                  put("nativeEndTimestamp", endTs)
+                  put("responseDeliveryTimestamp", System.currentTimeMillis())
+                }
 
-              if (isTrace) {
-                Log.d(TAG, "[NM_RESPONSE_CREATED] requestId=$requestId cancel=${decision.blocked} elapsed=${endTs - startTs}ms")
-              }
+                if (isTrace) {
+                  Log.d(TAG, "[NM_RESPONSE_CREATED] requestId=$requestId cancel=${decision.blocked} elapsed=${endTs - startTs}ms")
+                }
 
-              try {
-                p.postMessage(resp)
-              } catch (e: Exception) {
-                Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$reqPortGen failed to send SHOULD_BLOCK_RESULT: ${e.message}")
-              }
+                // Deliver on Main thread and verify port still active
+                mainHandler.post {
+                  synchronized(portLock) {
+                    if (activePort != p) {
+                      Log.w(TAG, "[PORT_STALE] Dropping response for stale/disconnected port")
+                      return@post
+                    }
+                  }
+                  try {
+                    p.postMessage(resp)
+                  } catch (e: Exception) {
+                    Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$reqPortGen failed to send SHOULD_BLOCK_RESULT: ${e.message}")
+                  }
 
-              if (isTrace) {
-                Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=SHOULD_BLOCK requestId=$requestId")
+                  if (isTrace) {
+                    Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=SHOULD_BLOCK requestId=$requestId")
+                  }
+                }
               }
             }
             "GET_COSMETIC_RESOURCES" -> {
@@ -565,49 +586,57 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 for (i in 0 until exceptionsArray.length()) exceptions.add(exceptionsArray.getString(i))
               }
 
-              val host = if (hostname.isNotEmpty()) hostname else try {
-                java.net.URI(if (url.contains("://")) url else "https://$url").host?.lowercase() ?: ""
-              } catch (_: Exception) { "" }
+              // Offload cosmetic evaluation to bounded background CPU executor
+              decisionExecutor.execute {
+                val host = if (hostname.isNotEmpty()) hostname else try {
+                  java.net.URI(if (url.contains("://")) url else "https://$url").host?.lowercase() ?: ""
+                } catch (_: Exception) { "" }
 
-              val isCosmeticAllowed = cosmeticPolicyProvider?.invoke(host) ?: true
-              val resp = if (!isCosmeticAllowed) {
-                JSONObject().apply {
-                  put("type", "COSMETIC_RESOURCES_RESULT")
-                  put("ok", true)
-                  put("generation", adblockBridge.getEngineGeneration())
-                  put("hideSelectors", org.json.JSONArray())
-                  put("forceHideSelectors", org.json.JSONArray())
-                  put("procedural", org.json.JSONArray())
-                  put("proceduralCount", 0)
-                  put("generics", false)
-                  put("requestId", requestId)
-                  put("portGeneration", reqPortGen)
+                val isCosmeticAllowed = cosmeticPolicyProvider?.invoke(host) ?: true
+                val resp = if (!isCosmeticAllowed) {
+                  JSONObject().apply {
+                    put("type", "COSMETIC_RESOURCES_RESULT")
+                    put("ok", true)
+                    put("generation", adblockBridge.getEngineGeneration())
+                    put("hideSelectors", org.json.JSONArray())
+                    put("forceHideSelectors", org.json.JSONArray())
+                    put("procedural", org.json.JSONArray())
+                    put("proceduralCount", 0)
+                    put("generics", false)
+                    put("requestId", requestId)
+                    put("portGeneration", reqPortGen)
+                  }
+                } else {
+                  val cosmetic = adblockBridge.getCosmeticResources(url, classes, ids, exceptions)
+                  JSONObject().apply {
+                    put("type", "COSMETIC_RESOURCES_RESULT")
+                    put("ok", cosmetic.ok)
+                    put("generation", cosmetic.generation)
+                    put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
+                    put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
+                    put("procedural", org.json.JSONArray(cosmetic.procedural))
+                    put("proceduralCount", cosmetic.proceduralCount)
+                    put("generics", cosmetic.generics)
+                    if (cosmetic.error != null) put("error", cosmetic.error)
+                    put("requestId", requestId)
+                    put("portGeneration", reqPortGen)
+                  }
                 }
-              } else {
-                val cosmetic = adblockBridge.getCosmeticResources(url, classes, ids, exceptions)
-                JSONObject().apply {
-                  put("type", "COSMETIC_RESOURCES_RESULT")
-                  put("ok", cosmetic.ok)
-                  put("generation", cosmetic.generation)
-                  put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
-                  put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
-                  put("procedural", org.json.JSONArray(cosmetic.procedural))
-                  put("proceduralCount", cosmetic.proceduralCount)
-                  put("generics", cosmetic.generics)
-                  if (cosmetic.error != null) put("error", cosmetic.error)
-                  put("requestId", requestId)
-                  put("portGeneration", reqPortGen)
+
+                mainHandler.post {
+                  synchronized(portLock) {
+                    if (activePort != p) return@post
+                  }
+                  try {
+                    p.postMessage(resp)
+                  } catch (e: Exception) {
+                    Log.e(TAG, "[PORT_ERROR] Failed to send COSMETIC_RESOURCES_RESULT", e)
+                  }
                 }
-              }
-              try {
-                p.postMessage(resp)
-              } catch (e: Exception) {
-                Log.e(TAG, "[PORT_ERROR] Failed to send COSMETIC_RESOURCES_RESULT", e)
               }
             }
             "GET_HIDDEN_CLASS_ID_SELECTORS" -> {
               val startTs = System.currentTimeMillis()
-              Log.d(TAG, "[ADBLOCK_HIDDEN_SELECTORS_START] instanceId=$instId generation=$reqPortGen requestId=$requestId ts=$startTs")
               val classesArray = message.optJSONArray("classes")
               val idsArray = message.optJSONArray("ids")
               val exceptionsArray = message.optJSONArray("exceptions")
@@ -625,26 +654,36 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 for (i in 0 until exceptionsArray.length()) exceptions.add(exceptionsArray.getString(i))
               }
 
-              val res = adblockBridge.getHiddenClassIdSelectors(classes, ids, exceptions)
-              val endTs = System.currentTimeMillis()
-              Log.d(TAG, "[ADBLOCK_HIDDEN_SELECTORS_OK] instanceId=$instId generation=$reqPortGen requestId=$requestId elapsed=${endTs - startTs}ms")
+              // Offload selector matching to bounded background CPU executor
+              decisionExecutor.execute {
+                Log.d(TAG, "[ADBLOCK_HIDDEN_SELECTORS_START] instanceId=$instId generation=$reqPortGen requestId=$requestId ts=$startTs")
+                val res = adblockBridge.getHiddenClassIdSelectors(classes, ids, exceptions)
+                val endTs = System.currentTimeMillis()
+                Log.d(TAG, "[ADBLOCK_HIDDEN_SELECTORS_OK] instanceId=$instId generation=$reqPortGen requestId=$requestId elapsed=${endTs - startTs}ms")
 
-              val resp = JSONObject().apply {
-                put("type", "HIDDEN_SELECTORS_RESULT")
-                put("ok", res.ok)
-                put("generation", res.generation)
-                put("hideSelectors", org.json.JSONArray(res.hideSelectors))
-                if (res.error != null) put("error", res.error)
-                put("requestId", requestId)
-                put("portGeneration", reqPortGen)
-                put("nativeStartTimestamp", startTs)
-                put("nativeEndTimestamp", endTs)
-                put("responseDeliveryTimestamp", System.currentTimeMillis())
-              }
-              try {
-                p.postMessage(resp)
-              } catch (e: Exception) {
-                Log.e(TAG, "[PORT_ERROR] Failed to send HIDDEN_SELECTORS_RESULT", e)
+                val resp = JSONObject().apply {
+                  put("type", "HIDDEN_SELECTORS_RESULT")
+                  put("ok", res.ok)
+                  put("generation", res.generation)
+                  put("hideSelectors", org.json.JSONArray(res.hideSelectors))
+                  if (res.error != null) put("error", res.error)
+                  put("requestId", requestId)
+                  put("portGeneration", reqPortGen)
+                  put("nativeStartTimestamp", startTs)
+                  put("nativeEndTimestamp", endTs)
+                  put("responseDeliveryTimestamp", System.currentTimeMillis())
+                }
+
+                mainHandler.post {
+                  synchronized(portLock) {
+                    if (activePort != p) return@post
+                  }
+                  try {
+                    p.postMessage(resp)
+                  } catch (e: Exception) {
+                    Log.e(TAG, "[PORT_ERROR] Failed to send HIDDEN_SELECTORS_RESULT", e)
+                  }
+                }
               }
             }
             "BLOCK_ELEMENT" -> {

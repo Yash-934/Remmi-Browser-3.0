@@ -698,22 +698,42 @@ class GeckoEngineManager private constructor(private val context: Context) {
       initializeRuntimeAsync()
     }
 
-    if (runtime == null || _initState.value != GeckoInitState.READY) {
-      Log.d(TAG, "[GECKO] loadUrl runtime not ready yet, deferring 50ms for tabId=$tabId")
-      mainHandler.postDelayed({ loadUrl(tabId, targetUrl) }, 50)
+    if (_initState.value == GeckoInitState.READY && runtime != null) {
+      val session = activeSessions[tabId] ?: run {
+        val profile = tab?.profile ?: currentProfile
+        val secLevel = tab?.securityLevel ?: SecurityLevel.STANDARD
+        val container = tab?.containerType ?: ContainerType.fromProfile(profile)
+        val isDesktop = tab?.isDesktopMode ?: false
+        getOrCreateSessionInternal(tabId, profile, secLevel, container, isDesktop)
+      }
+      try {
+        session.loadUri(targetUrl)
+      } catch (e: Exception) {
+        Log.w(TAG, "[GECKO] loadUrl error on tabId=$tabId: ${e.message}")
+      }
       return
     }
-    val session = activeSessions[tabId] ?: run {
-      val profile = tab?.profile ?: currentProfile
-      val secLevel = tab?.securityLevel ?: SecurityLevel.STANDARD
-      val container = tab?.containerType ?: ContainerType.fromProfile(profile)
-      val isDesktop = tab?.isDesktopMode ?: false
-      getOrCreateSessionInternal(tabId, profile, secLevel, container, isDesktop)
-    }
-    try {
-      session.loadUri(targetUrl)
-    } catch (e: Exception) {
-      Log.w(TAG, "[GECKO] loadUrl error on tabId=$tabId: ${e.message}")
+
+    // Await runtime readiness once via reactive StateFlow instead of polling
+    CoroutineScope(Dispatchers.Main.immediate).launch {
+      try {
+        val finalState = _initState.first { it == GeckoInitState.READY || it == GeckoInitState.FAILED }
+        if (finalState == GeckoInitState.READY && runtime != null) {
+          val currentTab = TabManager.getInstance().getTab(tabId)
+          val session = activeSessions[tabId] ?: run {
+            val profile = currentTab?.profile ?: currentProfile
+            val secLevel = currentTab?.securityLevel ?: SecurityLevel.STANDARD
+            val container = currentTab?.containerType ?: ContainerType.fromProfile(profile)
+            val isDesktop = currentTab?.isDesktopMode ?: false
+            getOrCreateSessionInternal(tabId, profile, secLevel, container, isDesktop)
+          }
+          session.loadUri(targetUrl)
+        } else {
+          Log.e(TAG, "[GECKO] loadUrl failed: runtime initialization failed for tabId=$tabId")
+        }
+      } catch (e: Exception) {
+        Log.w(TAG, "[GECKO] loadUrl coroutine error on tabId=$tabId: ${e.message}")
+      }
     }
   }
 

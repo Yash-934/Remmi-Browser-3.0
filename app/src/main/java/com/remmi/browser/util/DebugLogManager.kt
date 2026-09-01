@@ -2,40 +2,53 @@ package com.remmi.browser.util
 
 import android.content.Context
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Unified Thread-Safe Diagnostic Log Store & Persistent Breadcrumbs for Remmi Browser.
- * Accessible across GeckoEngineManager, BlockExtension, TorManager, and UI layers.
+ * Non-blocking in-memory ring buffer with coalesced, debounced background I/O writer.
  */
 object DebugLogManager {
   private const val TAG = "RemmiDebugLog"
   private const val MAX_LOGS = 300
   private const val MAX_BREADCRUMBS = 200
   private const val BREADCRUMBS_FILE = "remmi_breadcrumbs.log"
+  private const val DEBOUNCE_DELAY_MS = 1000L
 
   private val _logs = MutableStateFlow<List<String>>(emptyList())
   val logs: StateFlow<List<String>> = _logs.asStateFlow()
 
   @Volatile
   private var appContext: Context? = null
-  private val ioScope = CoroutineScope(Dispatchers.IO)
   private val persistentBreadcrumbs = ConcurrentLinkedDeque<String>()
   private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+  private val isDirty = AtomicBoolean(false)
+
+  private val backgroundWriter = Executors.newSingleThreadScheduledExecutor { r ->
+    Thread(r, "DebugLogWriter").apply {
+      priority = Thread.MIN_PRIORITY
+    }
+  }
+
+  @Volatile
+  private var pendingFlushTask: ScheduledFuture<*>? = null
 
   fun init(context: Context) {
     appContext = context.applicationContext
-    loadPersistedBreadcrumbs()
+    backgroundWriter.execute {
+      loadPersistedBreadcrumbs()
+    }
   }
 
   fun log(message: String) {
@@ -55,22 +68,25 @@ object DebugLogManager {
       _logs.value = current
     }
 
-    // 2. Update persistent ring buffer (chronological order)
+    // 2. Update thread-safe in-memory ring buffer (chronological order)
     persistentBreadcrumbs.addLast(entry)
     while (persistentBreadcrumbs.size > MAX_BREADCRUMBS) {
       persistentBreadcrumbs.pollFirst()
     }
 
-    // 3. Flush rule: Synchronous flush for critical/fatal/lifecycle events, async otherwise
-    if (sanitized.contains("[APP_LIFECYCLE]") ||
-        sanitized.contains("CRITICAL") ||
-        sanitized.contains("FATAL") ||
-        sanitized.contains("ERROR")
-    ) {
-      flushSynchronously()
-    } else {
-      ioScope.launch {
-        flushInternal()
+    // 3. Debounced, coalescing background write (Zero blocking on UI or worker threads)
+    scheduleDebouncedFlush()
+  }
+
+  private fun scheduleDebouncedFlush() {
+    isDirty.set(true)
+    synchronized(isDirty) {
+      if (pendingFlushTask == null || pendingFlushTask?.isDone == true) {
+        pendingFlushTask = backgroundWriter.schedule({
+          if (isDirty.compareAndSet(true, false)) {
+            flushInternal()
+          }
+        }, DEBOUNCE_DELAY_MS, TimeUnit.MILLISECONDS)
       }
     }
   }
@@ -96,6 +112,9 @@ object DebugLogManager {
     return sanitized
   }
 
+  /**
+   * Explicit synchronous flush strictly for fatal crash handler hand-off.
+   */
   fun flushSynchronously() {
     synchronized(persistentBreadcrumbs) {
       val ctx = appContext ?: return
@@ -107,6 +126,7 @@ object DebugLogManager {
         if (tempFile.exists()) {
           tempFile.renameTo(file)
         }
+        isDirty.set(false)
       } catch (_: Throwable) {}
     }
   }
@@ -146,11 +166,14 @@ object DebugLogManager {
     synchronized(this) {
       _logs.value = emptyList()
       persistentBreadcrumbs.clear()
-      val ctx = appContext
-      if (ctx != null) {
-        try {
-          File(ctx.filesDir, BREADCRUMBS_FILE).delete()
-        } catch (_: Throwable) {}
+      isDirty.set(false)
+      backgroundWriter.execute {
+        val ctx = appContext
+        if (ctx != null) {
+          try {
+            File(ctx.filesDir, BREADCRUMBS_FILE).delete()
+          } catch (_: Throwable) {}
+        }
       }
     }
   }

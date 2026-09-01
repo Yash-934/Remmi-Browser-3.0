@@ -80,14 +80,17 @@ data class FallbackNetworkRule(
   val resourceTypes: Set<String> = emptySet(),
   val excludedResourceTypes: Set<String> = emptySet(),
   val methods: Set<String> = emptySet(),
-  val thirdParty: Boolean? = null
+  val thirdParty: Boolean? = null,
+  val includedSourceDomains: Set<String> = emptySet(),
+  val excludedSourceDomains: Set<String> = emptySet()
 ) {
   fun matches(
     targetUrl: String,
     host: String,
     reqMethod: String,
     reqResourceType: String,
-    isThirdParty: Boolean
+    isThirdParty: Boolean,
+    sourceHost: String = ""
   ): Boolean {
     if (methods.isNotEmpty() && !methods.contains(reqMethod.uppercase())) {
       return false
@@ -101,6 +104,21 @@ data class FallbackNetworkRule(
     }
     if (excludedResourceTypes.isNotEmpty() && excludedResourceTypes.any { matchesType(it, normType) }) {
       return false
+    }
+    if (includedSourceDomains.isNotEmpty()) {
+      if (sourceHost.isEmpty()) return false
+      val normSource = sourceHost.lowercase().trim()
+      val matchesIncluded = includedSourceDomains.any { inc ->
+        normSource == inc || normSource.endsWith(".$inc")
+      }
+      if (!matchesIncluded) return false
+    }
+    if (excludedSourceDomains.isNotEmpty() && sourceHost.isNotEmpty()) {
+      val normSource = sourceHost.lowercase().trim()
+      val matchesExcluded = excludedSourceDomains.any { exc ->
+        normSource == exc || normSource.endsWith(".$exc")
+      }
+      if (matchesExcluded) return false
     }
     if (domainPattern != null) {
       val d = domainPattern.lowercase()
@@ -136,20 +154,28 @@ data class FallbackNetworkRule(
   }
 }
 
+data class FallbackEngineSet(
+  val blockedHostnames: Set<String> = emptySet(),
+  val blockedSubstrings: List<String> = emptyList(),
+  val allowList: Set<String> = emptySet(),
+  val fallbackNetworkRules: List<FallbackNetworkRule> = emptyList(),
+  val fallbackCosmeticRules: List<Pair<String?, String>> = emptyList(),
+  val fallbackAdditionalCosmeticRules: List<Pair<String?, String>> = emptyList(),
+  val fallbackProceduralFilters: List<String> = emptyList(),
+  val fallbackCosmeticExceptions: Set<String> = emptySet(),
+  val generation: Long = 1L
+)
+
 /**
  * Remmi Adblock Bridge
  * Bridges to native Rust adblock engine (libadblock_rust.so) with deterministic fallback to built-in rules.
  */
 class AdblockBridge {
 
-  private val blockedHostnames = ConcurrentHashMap.newKeySet<String>()
-  private val blockedSubstrings = CopyOnWriteArrayList<String>()
-  private val allowList = ConcurrentHashMap.newKeySet<String>()
-  private val fallbackNetworkRules = java.util.concurrent.CopyOnWriteArrayList<FallbackNetworkRule>()
-  private val fallbackCosmeticRules = java.util.concurrent.CopyOnWriteArrayList<Pair<String?, String>>()
-  private val fallbackAdditionalCosmeticRules = java.util.concurrent.CopyOnWriteArrayList<Pair<String?, String>>()
-  private val fallbackProceduralFilters = java.util.concurrent.CopyOnWriteArrayList<String>() // domain (or null for generic) to selector
-  private val fallbackCosmeticExceptions = ConcurrentHashMap.newKeySet<String>() // domain##selector or ##selector exception
+  @Volatile
+  private var activeFallbackEngine: FallbackEngineSet = FallbackEngineSet()
+  private val compileLock = Any()
+  private val compileJobSequence = AtomicLong(0L)
 
   val totalBlockedCount = AtomicInteger(0)
   private val localEngineGeneration = AtomicLong(1L)
@@ -387,32 +413,20 @@ class AdblockBridge {
     }
   }
 
-  fun loadDefaultTrackerRules(compileToNative: Boolean = true) {
-    allowList.clear()
-    fallbackCosmeticExceptions.clear()
-    fallbackNetworkRules.clear()
+  private fun getMemoryStats(): String {
+    val runtime = Runtime.getRuntime()
+    val usedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+    val maxMb = runtime.maxMemory() / (1024 * 1024)
+    val nativeMb = try {
+      android.os.Debug.getNativeHeapAllocatedSize() / (1024 * 1024)
+    } catch (_: Throwable) { -1L }
+    return "heapUsed=${usedMb}MB heapMax=${maxMb}MB nativeAlloc=${nativeMb}MB"
+  }
 
-    val defaultDomains = listOf(
-      "doubleclick.net", "googlesyndication.com", "google-analytics.com",
-      "googletagmanager.com", "adservice.google.com", "admob.com",
-      "adnxs.com", "adsrvr.org", "criteo.com", "criteo.net",
-      "outbrain.com", "taboola.com", "scorecardresearch.com",
-      "quantserve.com", "quantcount.com", "moatads.com",
-      "pubmatic.com", "rubiconproject.com", "openx.net",
-      "casalemedia.com", "applovin.com", "unityads.unity3d.com",
-      "vungle.com", "appsflyer.com", "branch.io", "adjust.com",
-      "kochava.com", "singular.net", "facebook.net/tr",
-      "connect.facebook.net", "ads-twitter.com", "analytics.twitter.com",
-      "bat.bing.com", "clarity.ms", "hotjar.com", "mouseflow.com",
-      "segment.io", "segment.com", "mixpanel.com", "amplitude.com",
-      "newrelic.com", "optimizely.com", "smartadserver.com",
-      "yieldmo.com", "indexww.com", "chartbeat.com", "adroll.com",
-      "advertising.com", "amazon-adsystem.com", "bidswitch.net",
-      "revcontent.com", "mgid.com", "zergnet.com", "popads.net"
-    )
-    blockedHostnames.addAll(defaultDomains)
-    for (d in defaultDomains) {
-      fallbackNetworkRules.add(
+  fun loadDefaultTrackerRules(compileToNative: Boolean = true) {
+    val initialRules = mutableListOf<FallbackNetworkRule>()
+    for (d in DEFAULT_DOMAINS) {
+      initialRules.add(
         FallbackNetworkRule(
           raw = "||$d^",
           isException = false,
@@ -422,16 +436,8 @@ class AdblockBridge {
         )
       )
     }
-
-    val defaultPatterns = listOf(
-      "/ads/", "/ad-banner", "/advertisement", "/trackers/",
-      "pixel.gif", "beacon.js", "analytics.js", "gtag/js",
-      "pagead2.googlesyndication.com", "adserver.", "adsystem.",
-      "telemetry.", "tracking.", "statcounter.com"
-    )
-    blockedSubstrings.addAll(defaultPatterns)
-    for (p in defaultPatterns) {
-      fallbackNetworkRules.add(
+    for (p in DEFAULT_PATTERNS) {
+      initialRules.add(
         FallbackNetworkRule(
           raw = p,
           isException = false,
@@ -442,9 +448,21 @@ class AdblockBridge {
       )
     }
 
+    activeFallbackEngine = FallbackEngineSet(
+      blockedHostnames = DEFAULT_DOMAINS.toSet(),
+      blockedSubstrings = DEFAULT_PATTERNS,
+      allowList = emptySet(),
+      fallbackNetworkRules = initialRules,
+      fallbackCosmeticRules = emptyList(),
+      fallbackAdditionalCosmeticRules = emptyList(),
+      fallbackProceduralFilters = emptyList(),
+      fallbackCosmeticExceptions = emptySet(),
+      generation = localEngineGeneration.get()
+    )
+
     if (compileToNative && isNativeLoaded) {
-      val rulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
-        defaultPatterns.joinToString("\n")
+      val rulesText = DEFAULT_DOMAINS.joinToString("\n") { "||$it^" } + "\n" +
+        DEFAULT_PATTERNS.joinToString("\n")
       try {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_DEFAULT_RULES_START]")
         val json = nativeCompileRules(rulesText, "")
@@ -471,6 +489,8 @@ class AdblockBridge {
     val excludedResourceTypes = mutableSetOf<String>()
     val methods = mutableSetOf<String>()
     var thirdParty: Boolean? = null
+    val includedSourceDomains = mutableSetOf<String>()
+    val excludedSourceDomains = mutableSetOf<String>()
 
     var patternPart = line
     val dollarIdx = line.indexOf('$')
@@ -485,11 +505,22 @@ class AdblockBridge {
           isImportant = true
         } else if (trimmedOpt == "third-party" || trimmedOpt == "3p") {
           thirdParty = true
-        } else if (trimmedOpt == "~third-party" || trimmedOpt == "~3p" || trimmedOpt == "1p" || trimmedOpt == "~3p") {
+        } else if (trimmedOpt == "~third-party" || trimmedOpt == "~3p" || trimmedOpt == "1p") {
           thirdParty = false
         } else if (trimmedOpt.startsWith("method=")) {
           val m = trimmedOpt.removePrefix("method=").trim().uppercase()
           if (m.isNotEmpty()) methods.add(m)
+        } else if (trimmedOpt.startsWith("domain=")) {
+          val domainList = trimmedOpt.removePrefix("domain=").split('|')
+          for (d in domainList) {
+            val cleanD = d.trim()
+            if (cleanD.startsWith("~")) {
+              val exc = cleanD.removePrefix("~").trim()
+              if (exc.isNotEmpty()) excludedSourceDomains.add(exc)
+            } else if (cleanD.isNotEmpty()) {
+              includedSourceDomains.add(cleanD)
+            }
+          }
         } else if (trimmedOpt.startsWith("~")) {
           excludedResourceTypes.add(trimmedOpt.removePrefix("~"))
         } else if (!trimmedOpt.contains("=")) {
@@ -522,178 +553,255 @@ class AdblockBridge {
       resourceTypes = resourceTypes,
       excludedResourceTypes = excludedResourceTypes,
       methods = methods,
-      thirdParty = thirdParty
+      thirdParty = thirdParty,
+      includedSourceDomains = includedSourceDomains,
+      excludedSourceDomains = excludedSourceDomains
     )
   }
 
   fun addCustomRule(rule: String) {
-    val trimmed = rule.trim()
-    val parsed = parseNetworkRule(trimmed)
-    if (parsed != null) {
-      fallbackNetworkRules.add(0, parsed)
-    }
-    if (trimmed.startsWith("@@")) {
-      val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
-      if (clean.isNotEmpty()) allowList.add(clean)
-    } else if (trimmed.startsWith("||")) {
-      val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
-      if (clean.isNotEmpty()) blockedHostnames.add(clean)
-    } else if (trimmed.isNotEmpty()) {
-      blockedSubstrings.add(trimmed)
+    synchronized(compileLock) {
+      val current = activeFallbackEngine
+      val trimmed = rule.trim()
+      val parsed = parseNetworkRule(trimmed)
+      val newNetworkRules = current.fallbackNetworkRules.toMutableList()
+      if (parsed != null) {
+        newNetworkRules.add(0, parsed)
+      }
+      val newAllowList = current.allowList.toMutableSet()
+      val newBlockedHostnames = current.blockedHostnames.toMutableSet()
+      val newBlockedSubstrings = current.blockedSubstrings.toMutableList()
+
+      if (!trimmed.contains('$')) {
+        if (trimmed.startsWith("@@")) {
+          val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
+          if (clean.isNotEmpty()) newAllowList.add(clean)
+        } else if (trimmed.startsWith("||")) {
+          val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
+          if (clean.isNotEmpty()) newBlockedHostnames.add(clean)
+        } else if (trimmed.isNotEmpty()) {
+          newBlockedSubstrings.add(trimmed)
+        }
+      }
+
+      activeFallbackEngine = current.copy(
+        blockedHostnames = newBlockedHostnames,
+        blockedSubstrings = newBlockedSubstrings,
+        allowList = newAllowList,
+        fallbackNetworkRules = newNetworkRules
+      )
     }
   }
 
-  fun compileRules(defaultRulesText: String, additionalRulesText: String = ""): Int {
-    Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_START] defaultLength=${defaultRulesText.length} additionalLength=${additionalRulesText.length}")
+  fun compileRules(
+    defaultRulesText: String, 
+    additionalRulesText: String = "",
+    source: String = "unknown"
+  ): Int {
+    val jobId = "compile_${compileJobSequence.incrementAndGet()}"
+    val currentGen = getEngineGeneration()
+    Log.i(TAG, "[COMPILE_REQUEST] source=$source generation=$currentGen jobId=$jobId")
 
-    val defaultLines = defaultRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
-    val additionalLines = additionalRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
-
-    if (defaultLines.isEmpty() && additionalLines.isEmpty()) {
-      Log.d(TAG, "[ADBLOCK_COMPILE] empty or comment-only rulesText, preserving active engine")
-      return 0
+    if (android.os.Looper.myLooper() != null && android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+      Log.w(TAG, "[COMPILE_UI_THREAD] compileRules called on Main Looper Thread!")
     }
 
-    // Always preserve default tracker domains & patterns
-    val defaultDomains = listOf(
-      "doubleclick.net", "googlesyndication.com", "google-analytics.com",
-      "googletagmanager.com", "adservice.google.com", "admob.com",
-      "adnxs.com", "adsrvr.org", "criteo.com", "criteo.net",
-      "outbrain.com", "taboola.com", "scorecardresearch.com",
-      "quantserve.com", "quantcount.com", "moatads.com",
-      "pubmatic.com", "rubiconproject.com", "openx.net",
-      "casalemedia.com", "applovin.com", "unityads.unity3d.com",
-      "vungle.com", "appsflyer.com", "branch.io", "adjust.com",
-      "kochava.com", "singular.net", "facebook.net/tr",
-      "connect.facebook.net", "ads-twitter.com", "analytics.twitter.com",
-      "bat.bing.com", "clarity.ms", "hotjar.com", "mouseflow.com",
-      "segment.io", "segment.com", "mixpanel.com", "amplitude.com",
-      "newrelic.com", "optimizely.com", "smartadserver.com",
-      "yieldmo.com", "indexww.com", "chartbeat.com", "adroll.com",
-      "advertising.com", "amazon-adsystem.com", "bidswitch.net",
-      "revcontent.com", "mgid.com", "zergnet.com", "popads.net"
-    )
-    val defaultPatterns = listOf(
-      "/ads/", "/ad-banner", "/advertisement", "/trackers/",
-      "pixel.gif", "beacon.js", "analytics.js", "gtag/js",
-      "pagead2.googlesyndication.com", "adserver.", "adsystem.",
-      "telemetry.", "tracking.", "statcounter.com"
-    )
+    synchronized(compileLock) {
+      val thread = Thread.currentThread()
+      val defaultBytes = defaultRulesText.toByteArray().size
+      val additionalBytes = additionalRulesText.toByteArray().size
+      val totalInputBytes = defaultBytes + additionalBytes
 
-    val builtinRulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
-      defaultPatterns.joinToString("\n")
+      Log.i(TAG, "[COMPILE_ENTER] thread=${thread.name} (id=${thread.id}) inputBytes=$totalInputBytes")
+      Log.d(TAG, "[COMPILE_MEM_START] ${getMemoryStats()}")
 
-    val combinedDefaultRulesText = if (defaultRulesText.isNotBlank()) {
-      "$builtinRulesText\n$defaultRulesText"
-    } else {
-      builtinRulesText
-    }
+      val defaultLines = defaultRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
+      val additionalLines = additionalRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
+      val inputLines = defaultLines.size + additionalLines.size
 
-    var compiledCount = 0
-    val oldGen = getEngineGeneration()
-    com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_START]")
-    Log.d(TAG, "[COMPILE_START] validLines=${defaultLines.size + additionalLines.size} oldGeneration=$oldGen")
-    if (isNativeLoaded) {
-      try {
-        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
-        val metricsJson = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
-        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_PARSE_DONE]")
-        val metricsObj = org.json.JSONObject(metricsJson)
-        compiledCount = metricsObj.optInt("parsedCandidates", 0)
-        Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
-        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_ENGINE_CREATED]")
-        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
-      } catch (e: Throwable) {
-        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
-        Log.e(TAG, "Native compile rules failed: ${e.message}", e)
+      // Reject only empty or obviously corrupted input
+      if (defaultLines.isEmpty() && additionalLines.isEmpty()) {
+        Log.d(TAG, "[ADBLOCK_COMPILE] empty or comment-only rulesText, preserving active engine")
+        return 0
       }
-    }
-    com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
-    val newGen = localEngineGeneration.incrementAndGet()
-    Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
-    com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
 
-    blockedHostnames.clear()
-    blockedSubstrings.clear()
-    allowList.clear()
-    fallbackCosmeticRules.clear()
-    fallbackCosmeticExceptions.clear()
-    fallbackNetworkRules.clear()
+      val builtinRulesText = DEFAULT_DOMAINS.joinToString("\n") { "||$it^" } + "\n" +
+        DEFAULT_PATTERNS.joinToString("\n")
 
-    // Re-seed default tracker domains in Kotlin fallback
-    blockedHostnames.addAll(defaultDomains)
-    for (d in defaultDomains) {
-      fallbackNetworkRules.add(
-        FallbackNetworkRule(
-          raw = "||$d^",
-          isException = false,
-          isImportant = false,
-          domainPattern = d,
-          substringPattern = null
-        )
-      )
-    }
-    blockedSubstrings.addAll(defaultPatterns)
-    for (p in defaultPatterns) {
-      fallbackNetworkRules.add(
-        FallbackNetworkRule(
-          raw = p,
-          isException = false,
-          isImportant = false,
-          domainPattern = null,
-          substringPattern = p
-        )
-      )
-    }
+      val combinedDefaultRulesText = if (defaultRulesText.isNotBlank()) {
+        "$builtinRulesText\n$defaultRulesText"
+      } else {
+        builtinRulesText
+      }
 
-    // Also parse into Kotlin memory fallback
-    fallbackAdditionalCosmeticRules.clear()
-    fallbackProceduralFilters.clear()
-    
-    fun parseToFallback(rules: String, isAdditional: Boolean) {
-      if (rules.isBlank()) return
-      rules.lines().forEach { line ->
-        val trimmed = line.trim()
-        if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
-          if (trimmed.contains("#@#")) {
-            fallbackCosmeticExceptions.add(trimmed)
-          } else if (trimmed.contains("#$#")) {
-            val parts = trimmed.split("#$#", limit = 2)
-            if (parts.size == 2 && parts[1].isNotBlank()) {
-              fallbackProceduralFilters.add(parts[1].trim())
-            }
-          } else if (trimmed.contains("##")) {
-            val parts = trimmed.split("##", limit = 2)
-            val domain = parts[0].trim().ifEmpty { null }
-            val selector = parts[1].trim()
-            if (selector.isNotEmpty()) {
-              if (isAdditional) fallbackAdditionalCosmeticRules.add(Pair(domain, selector))
-              else fallbackCosmeticRules.add(Pair(domain, selector))
-            }
-          } else {
-            val parsedNet = parseNetworkRule(trimmed)
-            if (parsedNet != null) {
-              fallbackNetworkRules.add(0, parsedNet)
-            }
-            if (trimmed.startsWith("@@")) {
-              val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
-              if (clean.isNotEmpty()) allowList.add(clean)
-            } else if (trimmed.startsWith("||")) {
-              val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
-              if (clean.isNotEmpty()) blockedHostnames.add(clean)
-            } else {
-              blockedSubstrings.add(trimmed)
+      // Start watchdog timer
+      val watchdogCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+      val watchdogThread = Thread {
+        val checkIntervalsMs = listOf(1000L, 5000L, 10000L, 30000L, 60000L)
+        val startTime = System.currentTimeMillis()
+        for (targetElapsed in checkIntervalsMs) {
+          val now = System.currentTimeMillis()
+          val sleepNeeded = targetElapsed - (now - startTime)
+          if (sleepNeeded > 0) {
+            try {
+              Thread.sleep(sleepNeeded)
+            } catch (_: InterruptedException) {
+              return@Thread
             }
           }
-          if (!isNativeLoaded) compiledCount++
+          if (watchdogCancelled.get()) return@Thread
+          val actualElapsed = System.currentTimeMillis() - startTime
+          Log.d(TAG, "[COMPILE_WATCHDOG] elapsedMs=$actualElapsed jobId=$jobId generation=$currentGen")
+          if (actualElapsed >= 60000L) {
+            Log.w(
+              TAG,
+              "[COMPILE_WATCHDOG_OVERDUE] elapsedMs=$actualElapsed jobId=$jobId thread=${thread.name} (id=${thread.id}) generation=$currentGen inputBytes=$totalInputBytes defaultBytes=$defaultBytes additionalBytes=$additionalBytes inputLines=$inputLines memory=${getMemoryStats()}"
+            )
+          }
+        }
+      }.apply {
+        isDaemon = true
+        name = "compile-watchdog-$jobId"
+        start()
+      }
+
+      var compiledCount = 0
+      val oldGen = getEngineGeneration()
+      Log.i(TAG, "[COMPILE_PARSE_START]")
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_START]")
+
+      if (isNativeLoaded) {
+        try {
+          Log.i(TAG, "[COMPILE_ENGINE_CREATE_START]")
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
+          val metricsJson = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_PARSE_DONE]")
+          val metricsObj = org.json.JSONObject(metricsJson)
+          compiledCount = metricsObj.optInt("parsedCandidates", 0)
+          Log.i(TAG, "[COMPILE_PARSE_DONE] parsedRules=$compiledCount")
+          Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
+          Log.d(TAG, "[COMPILE_MEM_PARSE_DONE] ${getMemoryStats()}")
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_ENGINE_CREATED]")
+          Log.i(TAG, "[COMPILE_ENGINE_CREATED]")
+          Log.d(TAG, "[COMPILE_MEM_ENGINE_CREATED] ${getMemoryStats()}")
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
+        } catch (e: Throwable) {
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
+          Log.e(TAG, "Native compile rules failed: ${e.message}", e)
         }
       }
+
+      // Prepare new FallbackEngineSet completely before swap
+      val newBlockedHostnames = mutableSetOf<String>()
+      val newBlockedSubstrings = mutableListOf<String>()
+      val newAllowList = mutableSetOf<String>()
+      val newNetworkRules = mutableListOf<FallbackNetworkRule>()
+      val newCosmeticRules = mutableListOf<Pair<String?, String>>()
+      val newAdditionalCosmeticRules = mutableListOf<Pair<String?, String>>()
+      val newProceduralFilters = mutableListOf<String>()
+      val newCosmeticExceptions = mutableSetOf<String>()
+
+      newBlockedHostnames.addAll(DEFAULT_DOMAINS)
+      for (d in DEFAULT_DOMAINS) {
+        newNetworkRules.add(
+          FallbackNetworkRule(
+            raw = "||$d^",
+            isException = false,
+            isImportant = false,
+            domainPattern = d,
+            substringPattern = null
+          )
+        )
+      }
+      newBlockedSubstrings.addAll(DEFAULT_PATTERNS)
+      for (p in DEFAULT_PATTERNS) {
+        newNetworkRules.add(
+          FallbackNetworkRule(
+            raw = p,
+            isException = false,
+            isImportant = false,
+            domainPattern = null,
+            substringPattern = p
+          )
+        )
+      }
+
+      fun parseToFallback(rules: String, isAdditional: Boolean) {
+        if (rules.isBlank()) return
+        rules.lines().forEach { line ->
+          val trimmed = line.trim()
+          if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
+            if (trimmed.contains("#@#")) {
+              newCosmeticExceptions.add(trimmed)
+            } else if (trimmed.contains("#$#")) {
+              val parts = trimmed.split("#$#", limit = 2)
+              if (parts.size == 2 && parts[1].isNotBlank()) {
+                newProceduralFilters.add(parts[1].trim())
+              }
+            } else if (trimmed.contains("##")) {
+              val parts = trimmed.split("##", limit = 2)
+              val domain = parts[0].trim().ifEmpty { null }
+              val selector = parts[1].trim()
+              if (selector.isNotEmpty()) {
+                if (isAdditional) newAdditionalCosmeticRules.add(Pair(domain, selector))
+                else newCosmeticRules.add(Pair(domain, selector))
+              }
+            } else {
+              val parsedNet = parseNetworkRule(trimmed)
+              if (parsedNet != null) {
+                newNetworkRules.add(0, parsedNet)
+              }
+              if (!trimmed.contains('$')) {
+                if (trimmed.startsWith("@@")) {
+                  val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
+                  if (clean.isNotEmpty()) newAllowList.add(clean)
+                } else if (trimmed.startsWith("||")) {
+                  val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
+                  if (clean.isNotEmpty()) newBlockedHostnames.add(clean)
+                } else {
+                  newBlockedSubstrings.add(trimmed)
+                }
+              }
+            }
+            if (!isNativeLoaded) compiledCount++
+          }
+        }
+      }
+
+      parseToFallback(combinedDefaultRulesText, false)
+      parseToFallback(additionalRulesText, true)
+
+      if (!isNativeLoaded) {
+        Log.i(TAG, "[COMPILE_PARSE_DONE] parsedRules=$compiledCount")
+        Log.i(TAG, "[COMPILE_ENGINE_CREATED]")
+      }
+
+      // Single Atomic publication
+      Log.i(TAG, "[COMPILE_SWAP_START]")
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
+      val newGen = localEngineGeneration.incrementAndGet()
+      activeFallbackEngine = FallbackEngineSet(
+        blockedHostnames = newBlockedHostnames,
+        blockedSubstrings = newBlockedSubstrings,
+        allowList = newAllowList,
+        fallbackNetworkRules = newNetworkRules,
+        fallbackCosmeticRules = newCosmeticRules,
+        fallbackAdditionalCosmeticRules = newAdditionalCosmeticRules,
+        fallbackProceduralFilters = newProceduralFilters,
+        fallbackCosmeticExceptions = newCosmeticExceptions,
+        generation = newGen
+      )
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
+      Log.i(TAG, "[COMPILE_SWAP_DONE]")
+      Log.d(TAG, "[COMPILE_MEM_SWAP_DONE] ${getMemoryStats()}")
+      Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
+
+      watchdogCancelled.set(true)
+      watchdogThread.interrupt()
+
+      Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_DONE] compiled=$compiledCount total=${getLoadedRulesCount()}")
+      return compiledCount
     }
-    
-    parseToFallback(combinedDefaultRulesText, false)
-    parseToFallback(additionalRulesText, true)
-    Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_DONE] compiled=$compiledCount total=${getLoadedRulesCount()}")
-    return compiledCount
   }
 
   fun getCosmeticResources(
@@ -758,7 +866,8 @@ class AdblockBridge {
       }
     }
 
-    // Kotlin Fallback Engine
+    // Kotlin Fallback Engine with snapshot isolation
+    val fallback = activeFallbackEngine
     val host = try {
       val uri = URI(url)
       uri.host?.lowercase() ?: ""
@@ -788,11 +897,11 @@ class AdblockBridge {
       }
     }
     
-    matchRules(fallbackCosmeticRules, hideList)
-    matchRules(fallbackAdditionalCosmeticRules, forceHideList)
+    matchRules(fallback.fallbackCosmeticRules, hideList)
+    matchRules(fallback.fallbackAdditionalCosmeticRules, forceHideList)
 
     // Apply exceptions
-    for (ex in fallbackCosmeticExceptions) {
+    for (ex in fallback.fallbackCosmeticExceptions) {
       val parts = ex.split("#@#", limit = 2)
       if (parts.size == 2) {
         val exDomain = parts[0].trim().lowercase()
@@ -804,8 +913,7 @@ class AdblockBridge {
       }
     }
     
-    // Also parse procedural filters manually for fallback
-    val proceduralList = if (aggressive) fallbackProceduralFilters.toList() else emptyList()
+    val proceduralList = if (aggressive) fallback.fallbackProceduralFilters else emptyList()
     
     return CosmeticResources(
       ok = true,
@@ -962,6 +1070,7 @@ class AdblockBridge {
         }
       }
 
+      val fallback = activeFallbackEngine
       val uri = try {
         URI(url)
       } catch (e: Exception) {
@@ -980,9 +1089,12 @@ class AdblockBridge {
       }
 
       val lowerUrl = url.lowercase()
+      val sourceHost = try {
+        if (sourceUrl.isNotEmpty()) URI(sourceUrl).host?.lowercase()?.trim() ?: "" else ""
+      } catch (_: Exception) { "" }
 
       // 1. Check Important Exceptions (@@...$important)
-      val importantException = fallbackNetworkRules.firstOrNull { it.isException && it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty) }
+      val importantException = fallback.fallbackNetworkRules.firstOrNull { it.isException && it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty, sourceHost) }
       if (importantException != null) {
         logSlowDecisionIfNeeded(startNs, resourceType)
         return BlockDecision(
@@ -996,7 +1108,7 @@ class AdblockBridge {
       }
 
       // 2. Check Important Blocks (...$important)
-      val importantBlock = fallbackNetworkRules.firstOrNull { !it.isException && it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty) }
+      val importantBlock = fallback.fallbackNetworkRules.firstOrNull { !it.isException && it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty, sourceHost) }
       if (importantBlock != null) {
         totalBlockedCount.incrementAndGet()
         logSlowDecisionIfNeeded(startNs, resourceType)
@@ -1011,7 +1123,7 @@ class AdblockBridge {
       }
 
       // 3. Check Normal Exceptions (@@...)
-      val normalException = fallbackNetworkRules.firstOrNull { it.isException && !it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty) }
+      val normalException = fallback.fallbackNetworkRules.firstOrNull { it.isException && !it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty, sourceHost) }
       if (normalException != null) {
         logSlowDecisionIfNeeded(startNs, resourceType)
         return BlockDecision(
@@ -1024,7 +1136,7 @@ class AdblockBridge {
       }
 
       // 4. Check Normal Blocks
-      val normalBlock = fallbackNetworkRules.firstOrNull { !it.isException && !it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty) }
+      val normalBlock = fallback.fallbackNetworkRules.firstOrNull { !it.isException && !it.isImportant && it.matches(lowerUrl, host, method, resourceType, thirdParty, sourceHost) }
       if (normalBlock != null) {
         totalBlockedCount.incrementAndGet()
         logSlowDecisionIfNeeded(startNs, resourceType)
@@ -1037,7 +1149,7 @@ class AdblockBridge {
         )
       }
 
-      if (allowList.any { rule ->
+      if (fallback.allowList.any { rule ->
         val cleanRule = rule.lowercase().trim()
         cleanRule.isNotEmpty() && (host == cleanRule || host.endsWith(".$cleanRule") || (cleanRule.length > 2 && lowerUrl.contains(cleanRule)))
       }) {
@@ -1050,7 +1162,7 @@ class AdblockBridge {
         )
       }
 
-      for (blockedHost in blockedHostnames) {
+      for (blockedHost in fallback.blockedHostnames) {
         if (host == blockedHost || host.endsWith(".$blockedHost")) {
           totalBlockedCount.incrementAndGet()
           logSlowDecisionIfNeeded(startNs, resourceType)
@@ -1063,7 +1175,7 @@ class AdblockBridge {
         }
       }
 
-      for (pattern in blockedSubstrings) {
+      for (pattern in fallback.blockedSubstrings) {
         if (lowerUrl.contains(pattern)) {
           totalBlockedCount.incrementAndGet()
           logSlowDecisionIfNeeded(startNs, resourceType)
@@ -1105,7 +1217,8 @@ class AdblockBridge {
         if (count > 0) return count
       } catch (_: Throwable) {}
     }
-    return blockedHostnames.size + blockedSubstrings.size
+    val fallback = activeFallbackEngine
+    return fallback.blockedHostnames.size + fallback.blockedSubstrings.size
   }
 
   // Native JNI functions implemented in rust/src/lib.rs
@@ -1126,6 +1239,33 @@ class AdblockBridge {
 
   companion object {
     private const val TAG = "AdblockBridge"
+
+    val DEFAULT_DOMAINS = listOf(
+      "doubleclick.net", "googlesyndication.com", "google-analytics.com",
+      "googletagmanager.com", "adservice.google.com", "admob.com",
+      "adnxs.com", "adsrvr.org", "criteo.com", "criteo.net",
+      "outbrain.com", "taboola.com", "scorecardresearch.com",
+      "quantserve.com", "quantcount.com", "moatads.com",
+      "pubmatic.com", "rubiconproject.com", "openx.net",
+      "casalemedia.com", "applovin.com", "unityads.unity3d.com",
+      "vungle.com", "appsflyer.com", "branch.io", "adjust.com",
+      "kochava.com", "singular.net", "facebook.net/tr",
+      "connect.facebook.net", "ads-twitter.com", "analytics.twitter.com",
+      "bat.bing.com", "clarity.ms", "hotjar.com", "mouseflow.com",
+      "segment.io", "segment.com", "mixpanel.com", "amplitude.com",
+      "newrelic.com", "optimizely.com", "smartadserver.com",
+      "yieldmo.com", "indexww.com", "chartbeat.com", "adroll.com",
+      "advertising.com", "amazon-adsystem.com", "bidswitch.net",
+      "revcontent.com", "mgid.com", "zergnet.com", "popads.net",
+      "mc.yandex.ru", "yandex.ru", "coinhive.com"
+    )
+
+    val DEFAULT_PATTERNS = listOf(
+      "/ads/", "/ad-banner", "/advertisement", "/trackers/",
+      "pixel.gif", "beacon.js", "analytics.js", "gtag/js",
+      "pagead2.googlesyndication.com", "adserver.", "adsystem.",
+      "telemetry.", "tracking.", "statcounter.com"
+    )
 
     @Volatile
     private var INSTANCE: AdblockBridge? = null

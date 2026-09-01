@@ -6,7 +6,10 @@ import android.util.Log
 import com.remmi.browser.security.CurrentTorRoute
 import com.remmi.browser.security.NetworkRouteAuthority
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -80,8 +83,13 @@ class FilterManager(
   private val _isUpdating = MutableStateFlow(false)
   val isUpdating: StateFlow<Boolean> = _isUpdating.asStateFlow()
 
+  private val bootstrapScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  @Volatile
+  private var activeLoadDeferred: Deferred<Int>? = null
+  private val loadFlightLock = Any()
+
   init {
-    loadPersistedRulesIntoBridge()
+    loadPersistedRulesIntoBridge(source = "init")
   }
 
   private fun loadSubscriptions(): List<FilterSubscription> {
@@ -147,7 +155,7 @@ class FilterManager(
       } else sub
     }
     saveCustomSubscriptions(_subscriptions.value.filter { it.isCustom })
-    loadPersistedRulesIntoBridge()
+    loadPersistedRulesIntoBridge(source = "toggleSubscription")
   }
 
   fun addCustomSubscription(url: String, title: String) {
@@ -177,7 +185,7 @@ class FilterManager(
       val file = File(dir, "$id.txt")
       if (file.exists()) file.delete()
     }
-    loadPersistedRulesIntoBridge()
+    loadPersistedRulesIntoBridge(source = "removeCustomSubscription")
   }
 
   fun getTotalActiveRules(): Int {
@@ -200,10 +208,10 @@ class FilterManager(
     Log.i(TAG, "[ADBLOCK_METRICS] blocked=$blockedCount")
   }
 
-  private suspend fun loadPersistedRulesIntoBridgeAsync(): Int = withContext(Dispatchers.IO) {
+  private suspend fun loadPersistedRulesIntoBridgeAsync(source: String = "unknown"): Int = withContext(Dispatchers.IO) {
     mutex.withLock {
       val dir = filterDir ?: return@withLock 0
-      Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START]")
+      Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START] source=$source")
       val defaultRules = StringBuilder()
       val additionalRules = StringBuilder()
       val rulesSummary = StringBuilder()
@@ -233,8 +241,8 @@ class FilterManager(
         }
       }
       if (defaultRules.isNotBlank() || additionalRules.isNotBlank()) {
-        val compiled = adblockBridge.compileRules(defaultRules.toString(), additionalRules.toString())
-        Log.d(TAG, "[ADBLOCK_COMPILE] name=all compiled=$compiled")
+        val compiled = adblockBridge.compileRules(defaultRules.toString(), additionalRules.toString(), source = source)
+        Log.d(TAG, "[ADBLOCK_COMPILE] name=all compiled=$compiled source=$source")
         Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=$compiled")
         logAdblockStatus()
         return@withLock compiled
@@ -246,14 +254,23 @@ class FilterManager(
     }
   }
 
-  private fun loadPersistedRulesIntoBridge() {
-    CoroutineScope(Dispatchers.IO).launch {
-      loadPersistedRulesIntoBridgeAsync()
+  fun loadPersistedRulesIntoBridge(source: String = "unknown"): Deferred<Int> {
+    synchronized(loadFlightLock) {
+      val existing = activeLoadDeferred
+      if (existing != null && !existing.isCompleted) {
+        Log.i(TAG, "[COMPILE_WAIT_EXISTING] source=$source")
+        return existing
+      }
+      val deferred = bootstrapScope.async {
+        loadPersistedRulesIntoBridgeAsync(source)
+      }
+      activeLoadDeferred = deferred
+      return deferred
     }
   }
 
   suspend fun ensureFiltersReady(): Boolean = withContext(Dispatchers.IO) {
-    val cachedRulesCount = loadPersistedRulesIntoBridgeAsync()
+    val cachedRulesCount = loadPersistedRulesIntoBridge(source = "ensureFiltersReady").await()
     val allDefaultCached = defaultList.all { sub ->
       val file = filterDir?.let { File(it, "${sub.id}.txt") }
       file != null && file.exists() && file.length() > 0
@@ -264,7 +281,7 @@ class FilterManager(
       return@withContext true
     }
     Log.i(TAG, "[ADBLOCK] Missing or incomplete cached filters, starting background download without blocking...")
-    CoroutineScope(Dispatchers.IO).launch {
+    bootstrapScope.launch {
       updateAllSubscriptions(force = false)
     }
     return@withContext false
@@ -283,7 +300,7 @@ class FilterManager(
           if (!res) successAll = false
         }
       }
-      val compiledCount = loadPersistedRulesIntoBridgeAsync()
+      val compiledCount = loadPersistedRulesIntoBridgeAsync(source = "updateAllSubscriptions")
       if (compiledCount <= 0) {
         Log.w(TAG, "[ADBLOCK] Subscriptions update completed but compiled count is $compiledCount")
       }

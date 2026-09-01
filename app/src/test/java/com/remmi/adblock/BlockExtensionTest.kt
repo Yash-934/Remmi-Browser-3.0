@@ -39,6 +39,8 @@ class BlockExtensionTest {
     bridge = AdblockBridge.getInstance()
     bridge.compileRules("||pagead2.googlesyndication.com^\n||google-analytics.com^\n||doubleclick.net^\n||googletagmanager.com^")
     blockExtension = BlockExtension.getInstance(bridge)
+    blockExtension.siteSecurityProvider = null
+    blockExtension.cosmeticPolicyProvider = null
 
     val mockExtension = allocateInstance(WebExtension::class.java)
     ReflectionHelpers.setField(mockExtension, "id", "remmi_engine_extension")
@@ -406,6 +408,12 @@ class BlockExtensionTest {
     fun sendAndCapture1(msg: JSONObject): JSONObject {
       receivedMessages.clear()
       portDelegate1!!.onPortMessage(msg, mockPort1)
+      val start = System.currentTimeMillis()
+      while (receivedMessages.isEmpty() && System.currentTimeMillis() - start < 3000) {
+        try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+        Thread.sleep(10)
+      }
+      try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
       val resp = receivedMessages.poll()
       assertNotNull("Must return exactly one response", resp)
       return resp!!
@@ -479,6 +487,12 @@ class BlockExtensionTest {
     fun sendAndCapture2(msg: JSONObject): JSONObject {
       receivedMessages.clear()
       portDelegate2.onPortMessage(msg, mockPort2)
+      val start = System.currentTimeMillis()
+      while (receivedMessages.isEmpty() && System.currentTimeMillis() - start < 3000) {
+        try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+        Thread.sleep(10)
+      }
+      try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
       val resp = receivedMessages.poll()
       assertNotNull("Must return exactly one response", resp)
       return resp!!
@@ -565,6 +579,13 @@ class BlockExtensionTest {
       portDelegate.onPortMessage(req, mockPort)
     }
 
+    val startTraffic = System.currentTimeMillis()
+    while (receivedMessages.size < count && System.currentTimeMillis() - startTraffic < 5000) {
+      try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+      Thread.sleep(10)
+    }
+    try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+
     // Verify exactly 100 responses, ALL must be SHOULD_BLOCK_RESULT, ZERO LOG messages
     assertEquals("Must receive exactly 100 responses for 100 requests", count, receivedMessages.size)
     val logMessages = receivedMessages.filter { it.optString("type") == "LOG" || it.optString("type") == "log" }
@@ -604,6 +625,13 @@ class BlockExtensionTest {
       }
       portDelegate!!.onPortMessage(req, mockPort)
     }
+
+    val startFailure = System.currentTimeMillis()
+    while (receivedMessages.size < count && System.currentTimeMillis() - startFailure < 5000) {
+      try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+      Thread.sleep(10)
+    }
+    try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
 
     // Verify exactly 100 responses and ZERO LOG message amplification
     assertEquals("Must receive exactly 100 responses for 100 failure requests", count, receivedMessages.size)
@@ -647,11 +675,22 @@ class BlockExtensionTest {
 
     // Helper for sending and capturing
     fun sendAndCapture(msg: JSONObject): JSONObject {
-      receivedMessages.clear()
+      val targetReqId = msg.optString("requestId")
       portDelegate!!.onPortMessage(msg, mockPort)
-      val resp = receivedMessages.poll()
-      assertNotNull("Must return response", resp)
-      return resp!!
+      val start = System.currentTimeMillis()
+      while (System.currentTimeMillis() - start < 5000) {
+        try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+        val found = receivedMessages.firstOrNull { it.optString("requestId") == targetReqId }
+        if (found != null) {
+          receivedMessages.remove(found)
+          return found
+        }
+        Thread.sleep(10)
+      }
+      try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+      val found = receivedMessages.firstOrNull { it.optString("requestId") == targetReqId }
+      assertNotNull("Must return response for $targetReqId", found)
+      return found!!
     }
 
     // 1. Initial Handshake: PORT_STATUS
@@ -751,6 +790,13 @@ class BlockExtensionTest {
     }
     futures.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
     executor.shutdown()
+
+    val startConc = System.currentTimeMillis()
+    while (receivedMessages.size < 100 && System.currentTimeMillis() - startConc < 5000) {
+      try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
+      Thread.sleep(10)
+    }
+    try { org.robolectric.shadows.ShadowLooper.idleMainLooper() } catch (_: Throwable) {}
 
     assertEquals("Must receive all 100 concurrent responses", 100, receivedMessages.size)
     val concurrentLogCount = receivedMessages.filter { it.optString("type") == "LOG" }.size
