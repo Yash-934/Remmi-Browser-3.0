@@ -391,113 +391,6 @@ fun SettingsScreen(
             }
           }
 
-          // Dedicated "Set as Default Browser" Prominent Action Card (if not default)
-          if (!isDefaultBrowser && (searchQuery.isBlank() || "default browser app links".contains(searchQuery, ignoreCase = true))) {
-            item {
-              Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                  containerColor = if (isLight) Color(0xFFEFF6FF) else Color(0xFF0F1E36)
-                ),
-                border = BorderStroke(
-                  1.2.dp,
-                  if (isLight) Color(0xFF93C5FD) else Color(0xFF38BDF8).copy(alpha = 0.6f)
-                ),
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .testTag("settings_default_browser_banner")
-              ) {
-                Row(
-                  modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                  verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                  Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                  ) {
-                    Box(
-                      modifier = Modifier
-                        .size(42.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(if (isLight) Color(0xFFDBEAFE) else Color(0xFF1E3A8A).copy(alpha = 0.5f))
-                        .border(0.8.dp, if (isLight) Color(0xFF60A5FA) else Color(0xFF38BDF8), RoundedCornerShape(12.dp)),
-                      contentAlignment = Alignment.Center
-                    ) {
-                      Icon(
-                        imageVector = Icons.Default.Language,
-                        contentDescription = null,
-                        tint = if (isLight) Color(0xFF1D4ED8) else Color(0xFF38BDF8),
-                        modifier = Modifier.size(22.dp)
-                      )
-                    }
-
-                    Column {
-                      Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                      ) {
-                        Text(
-                          text = "Set as Default Browser",
-                          color = if (isLight) Color(0xFF1E3A8A) else Color(0xFFF1F5F9),
-                          fontSize = 14.sp,
-                          fontWeight = FontWeight.Bold
-                        )
-                        Surface(
-                          shape = RoundedCornerShape(4.dp),
-                          color = if (isLight) Color(0xFFFEF3C7) else Color(0xFF78350F)
-                        ) {
-                          Text(
-                            text = "NOT SET",
-                            color = if (isLight) Color(0xFFB45309) else Color(0xFFFBBF24),
-                            fontSize = 8.5.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontFamily = CyberMonoFamily,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                          )
-                        }
-                      }
-                      Spacer(modifier = Modifier.height(2.dp))
-                      Text(
-                        text = "Open links automatically in Remmi with Tor & privacy protection.",
-                        color = textSecondaryColor,
-                        fontSize = 11.5.sp,
-                        lineHeight = 15.sp
-                      )
-                    }
-                  }
-
-                  Spacer(modifier = Modifier.width(8.dp))
-
-                  Button(
-                    onClick = {
-                      if (activity != null) {
-                        com.remmi.browser.util.DefaultBrowserHelper.requestSetDefaultBrowser(activity, defaultBrowserLauncher)
-                      }
-                    },
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(
-                      containerColor = if (isLight) Color(0xFF2563EB) else Color(0xFF00E5FF),
-                      contentColor = if (isLight) Color.White else Color(0xFF070B13)
-                    ),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    modifier = Modifier.testTag("settings_set_default_btn")
-                  ) {
-                    Text(
-                      text = "MAKE DEFAULT",
-                      fontSize = 11.sp,
-                      fontWeight = FontWeight.ExtraBold,
-                      fontFamily = ThemeCyber.fontFamily
-                    )
-                  }
-                }
-              }
-            }
-          }
-
           // Category 1: Search Engine
           val currentEngine = SearchEngine.fromId(settings.searchEngineName)
           val searchEngineSubtitle = "${currentEngine.displayName} • ${currentEngine.subtitle}"
@@ -2096,31 +1989,34 @@ private fun AdblockSubScreen(
           Spacer(modifier = Modifier.width(13.dp))
 
           Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Text(
-                text = sub.title,
-                color = textPrimary,
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.Bold
-              )
-              Spacer(modifier = Modifier.width(6.dp))
-              val ruleBadgeText = if (sub.ruleCount > 0) {
-                "(${sub.ruleCount} RULES)"
-              } else {
-                "(NOT DOWNLOADED)"
-              }
-              Text(
-                text = ruleBadgeText,
-                color = if (sub.ruleCount > 0) orangeTint else textSecondary,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold
-              )
-            }
+            Text(
+              text = sub.title,
+              color = textPrimary,
+              fontSize = 13.5.sp,
+              fontWeight = FontWeight.Bold
+            )
             Spacer(modifier = Modifier.height(2.dp))
+            if (sub.ruleCount > 0) {
+              Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = orangeBg
+              ) {
+                Text(
+                  text = "${sub.ruleCount} RULES",
+                  color = orangeTint,
+                  fontSize = 9.5.sp,
+                  fontWeight = FontWeight.ExtraBold,
+                  fontFamily = CyberMonoFamily,
+                  modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.5.dp)
+                )
+              }
+              Spacer(modifier = Modifier.height(3.dp))
+            }
             Text(
               text = sub.description,
               color = textSecondary,
-              fontSize = 11.sp
+              fontSize = 11.sp,
+              lineHeight = 15.sp
             )
           }
 

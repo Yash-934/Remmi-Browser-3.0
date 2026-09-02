@@ -411,207 +411,194 @@ fun TabGridSheet(
         }
       }
     } else {
-      // NORMAL BRAND HEADER: [ R ] Remmi [ 3 ]             [+] [X]
+      // COMPACT HEADER: [ R Remmi 1 ]  [ Search ]  [Incog] [+]
       Row(
         modifier = Modifier
           .fillMaxWidth()
           .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
       ) {
         // Logo + Remmi Title + Total Count Pill
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Surface(
-            shape = RoundedCornerShape(8.dp),
-            color = activeAccentColor.copy(alpha = 0.15f),
-            border = BorderStroke(1.dp, activeAccentColor.copy(alpha = 0.5f)),
-            modifier = Modifier.size(32.dp)
-          ) {
-            Box(contentAlignment = Alignment.Center) {
-              Text(
-                text = "R",
-                color = activeAccentColor,
-                fontFamily = CyberMonoFamily,
-                fontWeight = FontWeight.Black,
-                fontSize = 16.sp
-              )
-            }
-          }
-          Spacer(modifier = Modifier.width(8.dp))
-          Text(
-            text = "Remmi",
-            color = textPrimary,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            fontFamily = CyberMonoFamily
-          )
-          Spacer(modifier = Modifier.width(6.dp))
-          Surface(
-            shape = CircleShape,
-            color = surfacePillColor,
-            border = BorderStroke(0.6.dp, borderColor)
-          ) {
-            Text(
-              text = "${tabs.size}",
-              color = textSecondary,
-              fontSize = 11.sp,
-              fontWeight = FontWeight.Bold,
-              fontFamily = CyberMonoFamily,
-              modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-            )
-          }
-        }
-
-        // Top Actions: [+] New Tab & [X] Close Switcher
-        Row(
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = surfaceCardColor,
+          border = BorderStroke(1.dp, activeAccentColor.copy(alpha = 0.2f))
         ) {
-          // [+] New Tab
-          Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = activeAccentColor.copy(alpha = 0.15f),
-            border = BorderStroke(1.dp, activeAccentColor.copy(alpha = 0.5f)),
-            modifier = Modifier
-              .size(36.dp)
-              .clip(RoundedCornerShape(10.dp))
-              .clickable {
-                onNewTab(PrivacyProfile.SHIELD, selectedSpaceFilter?.takeIf { it != "personal" && it != "incognito" && it != "tor" })
-                onDismiss()
+          Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+          ) {
+            Surface(
+              shape = RoundedCornerShape(6.dp),
+              color = activeAccentColor.copy(alpha = 0.15f),
+              modifier = Modifier.size(24.dp)
+            ) {
+              Box(contentAlignment = Alignment.Center) {
+                Text(
+                  text = "R",
+                  color = activeAccentColor,
+                  fontFamily = CyberMonoFamily,
+                  fontWeight = FontWeight.Bold,
+                  fontSize = 14.sp
+                )
               }
-              .testTag("add_tab_button")
-          ) {
-            Box(contentAlignment = Alignment.Center) {
-              Icon(
-                Icons.Default.Add,
-                contentDescription = "New Tab",
-                tint = activeAccentColor,
-                modifier = Modifier.size(20.dp)
-              )
             }
-          }
-
-          // [X] Close Tab Switcher
-          Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = surfacePillColor,
-            border = BorderStroke(0.8.dp, borderColor),
-            modifier = Modifier
-              .size(36.dp)
-              .clip(RoundedCornerShape(10.dp))
-              .clickable(onClick = onDismiss)
-              .testTag("close_tabs_sheet_button")
-          ) {
-            Box(contentAlignment = Alignment.Center) {
-              Icon(
-                Icons.Default.Close,
-                contentDescription = "Close Tabs Switcher",
-                tint = textPrimary,
-                modifier = Modifier.size(18.dp)
-              )
-            }
-          }
-        }
-      }
-    }
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    // 2. SEARCH TABS AND SPACES INPUT BAR
-    Surface(
-      shape = RoundedCornerShape(22.dp),
-      color = surfaceCardColor,
-      border = BorderStroke(1.dp, borderColor),
-      shadowElevation = if (isDark) 0.dp else 1.dp,
-      modifier = Modifier
-        .fillMaxWidth()
-        .height(44.dp)
-    ) {
-      Row(
-        modifier = Modifier
-          .fillMaxSize()
-          .padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
-      ) {
-        Icon(
-          imageVector = Icons.Default.Search,
-          contentDescription = "Search Tabs and Spaces",
-          tint = if (searchQuery.isNotEmpty()) activeAccentColor else textMuted,
-          modifier = Modifier.size(18.dp)
-        )
-        Spacer(modifier = Modifier.width(10.dp))
-        Box(modifier = Modifier.weight(1f)) {
-          if (searchQuery.isEmpty()) {
             Text(
-              text = "Search Tabs and Spaces",
-              color = textMuted,
-              fontSize = 13.sp,
-            )
-          }
-          BasicTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            singleLine = true,
-            textStyle = TextStyle(
+              text = "Remmi",
               color = textPrimary,
-              fontSize = 13.5.sp,
-              fontWeight = FontWeight.Medium
-            ),
-            cursorBrush = SolidColor(activeAccentColor),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            modifier = Modifier.fillMaxWidth()
-          )
+              fontSize = 14.sp,
+              fontWeight = FontWeight.Bold,
+              fontFamily = CyberMonoFamily
+            )
+            Surface(
+              shape = CircleShape,
+              color = surfaceCardColor,
+              border = BorderStroke(0.5.dp, borderColor)
+            ) {
+              Text(
+                text = "${tabs.size}",
+                color = textSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = CyberMonoFamily,
+                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+              )
+            }
+          }
         }
-        if (searchQuery.isNotEmpty()) {
-          IconButton(
-            onClick = { searchQuery = "" },
-            modifier = Modifier.size(24.dp)
+
+        // Search Bar
+        Surface(
+          shape = RoundedCornerShape(20.dp),
+          color = surfaceCardColor,
+          border = BorderStroke(1.dp, borderColor),
+          shadowElevation = if (isDark) 0.dp else 1.dp,
+          modifier = Modifier
+            .weight(1f)
+            .height(36.dp)
+        ) {
+          Row(
+            modifier = Modifier
+              .fillMaxSize()
+              .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
           ) {
             Icon(
-              Icons.Default.Close,
-              contentDescription = "Clear search",
-              tint = textMuted,
-              modifier = Modifier.size(15.dp)
+              imageVector = Icons.Default.Search,
+              contentDescription = "Search Tabs and Spaces",
+              tint = if (searchQuery.isNotEmpty()) activeAccentColor else textMuted,
+              modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Box(modifier = Modifier.weight(1f)) {
+              if (searchQuery.isEmpty()) {
+                Text(
+                  text = "Search Tabs and Spaces",
+                  color = textMuted,
+                  fontSize = 12.sp,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis
+                )
+              }
+              BasicTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                singleLine = true,
+                textStyle = TextStyle(
+                  color = textPrimary,
+                  fontSize = 12.5.sp,
+                  fontWeight = FontWeight.Medium
+                ),
+                cursorBrush = SolidColor(activeAccentColor),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                modifier = Modifier.fillMaxWidth()
+              )
+            }
+            if (searchQuery.isNotEmpty()) {
+              IconButton(
+                onClick = { searchQuery = "" },
+                modifier = Modifier.size(24.dp)
+              ) {
+                Icon(
+                  Icons.Default.Close,
+                  contentDescription = "Clear search",
+                  tint = textMuted,
+                  modifier = Modifier.size(14.dp)
+                )
+              }
+            }
+          }
+        }
+
+        // [ Incognito ] Button
+        Surface(
+          shape = RoundedCornerShape(10.dp),
+          color = surfaceCardColor,
+          border = BorderStroke(1.dp, borderColor),
+          modifier = Modifier
+            .size(36.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable {
+              onNewTab(PrivacyProfile.INCOGNITO, null)
+              onDismiss()
+            }
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              painter = painterResource(R.drawable.ic_incognito),
+              contentDescription = "New Incognito Tab",
+              tint = textPrimary,
+              modifier = Modifier.size(18.dp)
             )
           }
         }
-      }
-    }
 
-    Spacer(modifier = Modifier.height(10.dp))
+        // [+] New Tab
+        Surface(
+          shape = RoundedCornerShape(10.dp),
+          color = surfaceCardColor,
+          border = BorderStroke(1.dp, borderColor),
+          modifier = Modifier
+            .size(36.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable {
+              onNewTab(PrivacyProfile.SHIELD, selectedSpaceFilter?.takeIf { it != "personal" && it != "incognito" && it != "tor" })
+              onDismiss()
+            }
+            .testTag("add_tab_button")
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              Icons.Default.Add,
+              contentDescription = "New Tab",
+              tint = activeAccentColor,
+              modifier = Modifier.size(20.dp)
+            )
+          }
+        }
 
-    // 3. QUICK CONTROLS ([ Incognito ] [ Tor ])
-    Row(
-      modifier = Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      // [ Incognito ] Pill Button
-      OutlinedButton(
-        onClick = {
-          onNewTab(PrivacyProfile.INCOGNITO, null)
-          onDismiss()
-        },
-        border = BorderStroke(1.dp, borderColor),
-        colors = ButtonDefaults.outlinedButtonColors(
-          containerColor = surfaceCardColor
-        ),
-        shape = RoundedCornerShape(12.dp),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-      ) {
-        Icon(
-          painter = painterResource(R.drawable.ic_incognito),
-          contentDescription = "New Incognito Tab",
-          tint = textPrimary,
-          modifier = Modifier.size(15.dp)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-          text = "Incognito",
-          fontSize = 12.5.sp,
-          color = textPrimary,
-          fontWeight = FontWeight.Medium
-        )
+        // [3 Dot / Close Menu]
+        Surface(
+          shape = RoundedCornerShape(10.dp),
+          color = surfaceCardColor,
+          border = BorderStroke(1.dp, borderColor),
+          modifier = Modifier
+            .size(36.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onDismiss)
+            .testTag("close_tabs_sheet_button")
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              Icons.Default.MoreVert,
+              contentDescription = "Options",
+              tint = textPrimary,
+              modifier = Modifier.size(18.dp)
+            )
+          }
+        }
       }
     }
 
@@ -1258,7 +1245,7 @@ private fun SpaceCard(
   val textMuted = cyberColors.textMuted
 
   Surface(
-    shape = RoundedCornerShape(16.dp),
+    shape = RoundedCornerShape(12.dp),
     color = if (isSelected) accentColor.copy(alpha = if (isDark) 0.18f else 0.10f) else surfaceColor,
     border = BorderStroke(
       width = if (isSelected) 1.8.dp else 1.dp,
@@ -1266,46 +1253,45 @@ private fun SpaceCard(
     ),
     shadowElevation = if (isDark || isSelected) 0.dp else 1.dp,
     modifier = Modifier
-      .width(112.dp)
-      .height(86.dp)
-      .clip(RoundedCornerShape(16.dp))
+      .width(140.dp)
+      .height(48.dp)
+      .clip(RoundedCornerShape(12.dp))
       .combinedClickable(
         onClick = onClick,
         onLongClick = onLongClick
       )
   ) {
-    Column(
+    Row(
       modifier = Modifier
         .fillMaxSize()
-        .padding(horizontal = 8.dp, vertical = 9.dp),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.SpaceBetween
+        .padding(horizontal = 12.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.SpaceBetween
     ) {
-      Box(
-        modifier = Modifier.size(28.dp),
-        contentAlignment = Alignment.Center
-      ) {
-        icon()
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+          modifier = Modifier.size(24.dp),
+          contentAlignment = Alignment.Center
+        ) {
+          icon()
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+          text = title.replace(" Space", ""),
+          color = if (isSelected) accentColor else textPrimary,
+          fontSize = 13.sp,
+          fontWeight = FontWeight.Bold,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis
+        )
       }
 
-      Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-          text = title,
-          color = if (isSelected) accentColor else textPrimary,
-          fontSize = 11.5.sp,
-          fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-          textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(1.dp))
-        Text(
-          text = if (count == 1) "1 Tab" else "$count Tabs",
-          color = if (isSelected) accentColor.copy(alpha = 0.9f) else textMuted,
-          fontSize = 10.sp,
-          fontWeight = FontWeight.Normal
-        )
-      }
+      Text(
+        text = if (count == 1) "1 tab" else "$count tabs",
+        color = if (isSelected) accentColor.copy(alpha = 0.9f) else textMuted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Normal
+      )
     }
   }
 }
@@ -1327,52 +1313,38 @@ private fun NewSpaceCard(
   val textSecondary = cyberColors.textSecondary
 
   Surface(
-    shape = RoundedCornerShape(16.dp),
+    shape = RoundedCornerShape(12.dp),
     color = surfaceColor,
     border = BorderStroke(1.dp, borderColor),
     shadowElevation = if (isDark) 0.dp else 1.dp,
     modifier = modifier
-      .width(112.dp)
-      .height(86.dp)
-      .clip(RoundedCornerShape(16.dp))
+      .width(120.dp)
+      .height(48.dp)
+      .clip(RoundedCornerShape(12.dp))
       .clickable(onClick = onClick)
   ) {
-    Column(
+    Row(
       modifier = Modifier
         .fillMaxSize()
-        .padding(horizontal = 8.dp, vertical = 9.dp),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.SpaceBetween
+        .padding(horizontal = 12.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.Center
     ) {
-      Box(
-        modifier = Modifier.size(28.dp),
-        contentAlignment = Alignment.Center
-      ) {
-        Icon(
-          imageVector = Icons.Default.Add,
-          contentDescription = "New Space",
-          tint = textPrimary,
-          modifier = Modifier.size(22.dp)
-        )
-      }
-
-      Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-          text = "New Space",
-          color = textPrimary,
-          fontSize = 11.5.sp,
-          fontWeight = FontWeight.SemiBold,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-          textAlign = TextAlign.Center
-        )
-        Text(
-          text = "Create",
-          color = textSecondary,
-          fontSize = 10.sp,
-          fontWeight = FontWeight.Normal
-        )
-      }
+      Icon(
+        imageVector = Icons.Default.Add,
+        contentDescription = "New Space",
+        tint = textPrimary,
+        modifier = Modifier.size(18.dp)
+      )
+      Spacer(modifier = Modifier.width(6.dp))
+      Text(
+        text = "New Space",
+        color = textPrimary,
+        fontSize = 12.5.sp,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis
+      )
     }
   }
 }

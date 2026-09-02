@@ -464,133 +464,100 @@ fun NewTabPage(
       }
 
       // ==========================================
-      // DEFAULT BROWSER PROMPT CARD (Home Screen)
+      // DEFAULT BROWSER PROMPT BANNER (Home Screen)
       // ==========================================
       if (!isDefaultBrowser && !isDefaultPromptDismissed) {
         Surface(
-          shape = RoundedCornerShape(16.dp),
+          shape = RoundedCornerShape(12.dp),
           color = if (isLight) Color(0xFFEFF6FF) else Color(0xFF0F1E36),
           border = BorderStroke(
-            1.2.dp,
-            if (isLight) Color(0xFF93C5FD) else Color(0xFF38BDF8).copy(alpha = 0.6f)
+            1.dp,
+            if (isLight) Color(0xFFBFDBFE) else Color(0xFF38BDF8).copy(alpha = 0.4f)
           ),
-          shadowElevation = if (isLight) 3.dp else 0.dp,
+          shadowElevation = if (isLight) 1.dp else 0.dp,
           modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 4.dp, bottom = 10.dp)
+            .padding(top = 2.dp, bottom = 4.dp)
             .testTag("home_set_default_browser_card")
         ) {
-          Column(
+          Row(
             modifier = Modifier
               .fillMaxWidth()
-              .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+              .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
           ) {
             Row(
-              modifier = Modifier.fillMaxWidth(),
-              horizontalArrangement = Arrangement.SpaceBetween,
-              verticalAlignment = Alignment.Top
+              modifier = Modifier.weight(1f),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-              Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+              Box(
+                modifier = Modifier
+                  .size(26.dp)
+                  .clip(RoundedCornerShape(7.dp))
+                  .background(if (isLight) Color(0xFFDBEAFE) else Color(0xFF1E3A8A).copy(alpha = 0.5f)),
+                contentAlignment = Alignment.Center
               ) {
-                Box(
-                  modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (isLight) Color(0xFFDBEAFE) else Color(0xFF1E3A8A).copy(alpha = 0.5f))
-                    .border(0.8.dp, if (isLight) Color(0xFF60A5FA) else Color(0xFF38BDF8), RoundedCornerShape(10.dp)),
-                  contentAlignment = Alignment.Center
-                ) {
-                  Icon(
-                    imageVector = Icons.Default.Language,
-                    contentDescription = null,
-                    tint = if (isLight) Color(0xFF1D4ED8) else Color(0xFF38BDF8),
-                    modifier = Modifier.size(22.dp)
-                  )
-                }
+                Icon(
+                  imageVector = Icons.Default.Language,
+                  contentDescription = null,
+                  tint = if (isLight) Color(0xFF1D4ED8) else Color(0xFF38BDF8),
+                  modifier = Modifier.size(15.dp)
+                )
+              }
 
-                Column(modifier = Modifier.weight(1f)) {
-                  Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                  ) {
-                    Text(
-                      text = "Set as Default Browser",
-                      color = if (isLight) Color(0xFF1E3A8A) else Color(0xFFF1F5F9),
-                      fontSize = 13.5.sp,
-                      fontWeight = FontWeight.Bold
-                    )
-                    Surface(
-                      shape = RoundedCornerShape(4.dp),
-                      color = if (isLight) Color(0xFFDCFCE7) else Color(0xFF064E3B)
-                    ) {
-                      Text(
-                        text = "PROTECT ALL LINKS",
-                        color = if (isLight) Color(0xFF15803D) else Color(0xFF34D399),
-                        fontSize = 8.5.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontFamily = CyberMonoFamily,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                      )
-                    }
+              Text(
+                text = "Set Remmi as default browser",
+                color = if (isLight) Color(0xFF1E3A8A) else Color(0xFFF1F5F9),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+              )
+            }
+
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+              Button(
+                onClick = {
+                  val activity = context as? Activity
+                  if (activity != null) {
+                    DefaultBrowserHelper.requestSetDefaultBrowser(activity, defaultBrowserLauncher)
                   }
-                  Spacer(modifier = Modifier.height(2.dp))
-                  Text(
-                    text = "Open web links automatically with Tor onion routing & ad-blocking privacy.",
-                    color = if (isLight) Color(0xFF475569) else Color(0xFF94A3B8),
-                    fontSize = 11.5.sp,
-                    lineHeight = 15.sp
-                  )
-                }
+                },
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(
+                  containerColor = if (isLight) Color(0xFF2563EB) else Color(0xFF00E5FF),
+                  contentColor = if (isLight) Color.White else Color(0xFF070B13)
+                ),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier
+                  .height(28.dp)
+                  .testTag("home_set_default_browser_btn")
+              ) {
+                Text(
+                  text = "SET DEFAULT",
+                  fontSize = 10.5.sp,
+                  fontWeight = FontWeight.ExtraBold,
+                  fontFamily = ThemeCyber.fontFamily,
+                  letterSpacing = 0.3.sp
+                )
               }
 
               IconButton(
                 onClick = { isDefaultPromptDismissed = true },
-                modifier = Modifier.size(26.dp)
+                modifier = Modifier.size(24.dp)
               ) {
                 Icon(
                   imageVector = Icons.Default.Close,
                   contentDescription = "Dismiss",
                   tint = if (isLight) Color(0xFF94A3B8) else Color(0xFF64748B),
-                  modifier = Modifier.size(16.dp)
+                  modifier = Modifier.size(14.dp)
                 )
               }
-            }
-
-            // Make Default Button
-            Button(
-              onClick = {
-                val activity = context as? Activity
-                if (activity != null) {
-                  DefaultBrowserHelper.requestSetDefaultBrowser(activity, defaultBrowserLauncher)
-                }
-              },
-              shape = RoundedCornerShape(10.dp),
-              colors = ButtonDefaults.buttonColors(
-                containerColor = if (isLight) Color(0xFF2563EB) else Color(0xFF00E5FF),
-                contentColor = if (isLight) Color.White else Color(0xFF070B13)
-              ),
-              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-              modifier = Modifier
-                .fillMaxWidth()
-                .testTag("home_set_default_browser_btn")
-            ) {
-              Icon(
-                imageVector = Icons.Default.Check,
-                contentDescription = null,
-                modifier = Modifier.size(15.dp)
-              )
-              Spacer(modifier = Modifier.width(6.dp))
-              Text(
-                text = "SET AS DEFAULT BROWSER",
-                fontSize = 11.5.sp,
-                fontWeight = FontWeight.ExtraBold,
-                fontFamily = ThemeCyber.fontFamily,
-                letterSpacing = 0.5.sp
-              )
             }
           }
         }
