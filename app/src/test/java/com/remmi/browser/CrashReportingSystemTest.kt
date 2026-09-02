@@ -76,7 +76,7 @@ class CrashReportingSystemTest {
     assertTrue(report.contains("Last startup phase: MAIN_ACTIVITY_CREATE"))
     assertTrue(report.contains("NATIVE:"))
     assertTrue(report.contains("SUBSYSTEM STATE:"))
-    assertTrue(report.contains("RECENT DIAGNOSTIC EVENTS"))
+    assertTrue(report.contains("PREVIOUS SESSION DIAGNOSTIC EVENTS"))
     assertTrue(report.contains("JAVA EXCEPTION:"))
     assertTrue(report.contains("java.lang.NullPointerException"))
     assertTrue(report.contains("Simulated crash in test component"))

@@ -219,7 +219,7 @@ class PerformanceAndAdblockBaselineRegressionTest {
     )
 
     assertTrue("Report must contain header", report.contains("REMMI BROWSER - AUTOMATIC DIAGNOSTIC REPORT"))
-    assertTrue("Report must contain native crash forensics section", report.contains("NATIVE CRASH FORENSICS:"))
+    assertTrue("Report must contain native crash forensics section", report.contains("ABNORMAL TERMINATION FORENSICS:"))
     assertTrue("Report must contain subsystem state", report.contains("SUBSYSTEM STATE:"))
     assertTrue("Report must contain device details", report.contains("DEVICE:"))
   }
