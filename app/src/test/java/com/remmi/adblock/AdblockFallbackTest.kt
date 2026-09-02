@@ -20,7 +20,7 @@ class AdblockFallbackTest {
     ReflectionHelpers.setField(bridge, "isNativeLoaded", true)
 
     val rules = """
-      ||doubleclick.net^
+      ||test-healthy-skip.com^
       ||google-analytics.com^
     """.trimIndent()
 
@@ -30,15 +30,15 @@ class AdblockFallbackTest {
     // Default patterns + domains are always added, but the specific 'rules' string is skipped
     // because parseToFallback should return early when isNativeLoaded = true.
     // Wait, our implementation of skipping just avoids calling `parseToFallback` altogether.
-    var foundDoubleClick = false
+    var foundTestDomain = false
     for (netRule in fallbackEngine.fallbackNetworkRules) {
-      if (netRule.raw == "||doubleclick.net^") {
-        foundDoubleClick = true
+      if (netRule.raw == "||test-healthy-skip.com^") {
+        foundTestDomain = true
       }
     }
     
-    // In healthy mode, the fallback should NOT contain doubleclick.net from the custom rules
-    assertTrue("Fallback must skip parsing when native is loaded", !foundDoubleClick)
+    // In healthy mode, the fallback should NOT contain test-healthy-skip.com from the custom rules
+    assertTrue("Fallback must skip parsing when native is loaded", !foundTestDomain)
   }
 
   @Test
@@ -48,22 +48,22 @@ class AdblockFallbackTest {
     ReflectionHelpers.setField(bridge, "isNativeLoaded", false)
 
     val rules = """
-      ||doubleclick.net^
+      ||test-degraded-build.com^
       ||google-analytics.com^
     """.trimIndent()
 
     val compiledCount = bridge.compileRules(rules)
     val fallbackEngine = ReflectionHelpers.getField<FallbackEngineSet>(bridge, "activeFallbackEngine")
     
-    var foundDoubleClick = false
+    var foundTestDomain = false
     for (netRule in fallbackEngine.fallbackNetworkRules) {
-      if (netRule.raw == "||doubleclick.net^") {
-        foundDoubleClick = true
+      if (netRule.raw == "||test-degraded-build.com^") {
+        foundTestDomain = true
       }
     }
     
-    // In degraded mode, the fallback MUST contain doubleclick.net from the custom rules
-    assertTrue("Fallback must be built when native is unavailable", foundDoubleClick)
+    // In degraded mode, the fallback MUST contain test-degraded-build.com from the custom rules
+    assertTrue("Fallback must be built when native is unavailable", foundTestDomain)
   }
 
   @Test
