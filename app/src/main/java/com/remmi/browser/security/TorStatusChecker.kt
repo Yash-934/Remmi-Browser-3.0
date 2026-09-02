@@ -181,8 +181,7 @@ object TorStatusChecker {
    * with 25s deadline and race orchestration.
    */
   suspend fun verifyTorRouting(socksPort: Int? = CurrentTorRoute.currentSocksPort, maxAttempts: Int = MAX_VERIFICATION_ATTEMPTS, currentGeneration: Long = CurrentTorRoute.currentGeneration): TorStatusResult =
-    try {
-      withContext(Dispatchers.IO) {
+    withContext(Dispatchers.IO) {
         Log.i("TorStatusChecker", "[FORENSIC] TOR_VERIFY_START port=$socksPort generation=$currentGeneration")
       if (socksPort == null || socksPort <= 0) {
         return@withContext TorStatusResult(
