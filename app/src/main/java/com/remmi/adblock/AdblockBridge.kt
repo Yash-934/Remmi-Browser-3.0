@@ -175,8 +175,34 @@ class AdblockBridge {
   @Volatile
   private var activeFallbackEngine: FallbackEngineSet = FallbackEngineSet()
   private val compileLock = Any()
+  private val swapLock = Any()
   private val compileJobSequence = AtomicLong(0L)
   private val activeCompileJobs = AtomicInteger(0)
+
+  private fun formatForensicMarker(
+    jobId: String,
+    marker: String,
+    lockName: String? = null,
+    waitStart: Long = 0L,
+    waitEnd: Long = 0L,
+    workerState: String = "EXECUTING",
+    extra: String = ""
+  ): String {
+    val heapUsed = com.remmi.browser.util.HangWatchdog.getHeapUsedBytes() / (1024 * 1024)
+    val heapMax = com.remmi.browser.util.HangWatchdog.getHeapMaxBytes() / (1024 * 1024)
+    val snap = com.remmi.browser.util.ProcessMemoryTelemetry.captureSnapshot()
+    val rssMb = snap.rssBytes / (1024 * 1024)
+    val pssMb = snap.pssBytes / (1024 * 1024)
+    val t = Thread.currentThread()
+    val isUi = (android.os.Looper.myLooper() != null && android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+    val lockStr = if (lockName != null) {
+      val dur = if (waitEnd >= waitStart && waitStart > 0) "${waitEnd - waitStart}ms" else "0ms"
+      " lockName=$lockName waitStart=$waitStart waitEnd=$waitEnd waitDurationMs=$dur workerState=$workerState"
+    } else {
+      " workerState=$workerState"
+    }
+    return "$marker jobId=$jobId heapUsed=${heapUsed}MB heapMax=${heapMax}MB rss=${rssMb}MB pss=${pssMb}MB thread=${t.name}(id=${t.id}) isUiThread=$isUi$lockStr $extra".trim()
+  }
 
   val totalBlockedCount = AtomicInteger(0)
   private val localEngineGeneration = AtomicLong(1L)
@@ -688,13 +714,19 @@ class AdblockBridge {
               com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
               val t = Thread.currentThread()
               Log.i(TAG, "[NATIVE_COMPILE_RETURN] timestamp=${System.currentTimeMillis()} thread=${t.name} id=${t.id} UI_THREAD=${t == android.os.Looper.getMainLooper().thread} jobId=$jobId")
+              val postCompileReturnMsg = formatForensicMarker(jobId, "[POST_COMPILE_RETURN]", workerState = "EXECUTING")
+              Log.i(TAG, postCompileReturnMsg)
+              com.remmi.browser.util.DebugLogManager.log(postCompileReturnMsg)
             } catch (e: Throwable) {
               com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
               Log.e(TAG, "Native compile rules failed: ${e.message}", e)
             }
           }
 
-          Log.i(TAG, "[COMPILE_RESULT_PARSE_START] jobId=$jobId")
+          val parseStartMarkerMsg = formatForensicMarker(jobId, "[POST_COMPILE_RESULT_PARSE_START]", workerState = "EXECUTING")
+          Log.i(TAG, parseStartMarkerMsg)
+          com.remmi.browser.util.DebugLogManager.log(parseStartMarkerMsg)
+
           // Prepare new FallbackEngineSet completely before swap
           val newBlockedHostnames = mutableSetOf<String>()
           val newBlockedSubstrings = mutableListOf<String>()
@@ -704,6 +736,7 @@ class AdblockBridge {
           val newAdditionalCosmeticRules = mutableListOf<Pair<String?, String>>()
           val newProceduralFilters = mutableListOf<String>()
           val newCosmeticExceptions = mutableSetOf<String>()
+          val tempParsedRules = mutableListOf<FallbackNetworkRule>()
 
           newBlockedHostnames.addAll(DEFAULT_DOMAINS)
           for (d in DEFAULT_DOMAINS) {
@@ -753,7 +786,7 @@ class AdblockBridge {
                 } else {
                   val parsedNet = parseNetworkRule(trimmed)
                   if (parsedNet != null) {
-                    newNetworkRules.add(0, parsedNet)
+                    tempParsedRules.add(parsedNet)
                   }
                   if (!trimmed.contains('$')) {
                     if (trimmed.startsWith("@@")) {
@@ -772,11 +805,34 @@ class AdblockBridge {
             }
           }
 
-          parseToFallback(combinedDefaultRulesText, false)
-          parseToFallback(additionalRulesText, true)
-          Log.i(TAG, "[COMPILE_RESULT_PARSE_DONE] jobId=$jobId")
+          if (isNativeLoaded) {
+            val fallbackSkippedMsg = formatForensicMarker(jobId, "[POST_COMPILE_FALLBACK_SKIPPED]", workerState = "EXECUTING")
+            Log.i(TAG, fallbackSkippedMsg)
+            com.remmi.browser.util.DebugLogManager.log(fallbackSkippedMsg)
+          } else {
+            val fallbackBuildStartMsg = formatForensicMarker(jobId, "[POST_COMPILE_FALLBACK_BUILD_START]", workerState = "EXECUTING")
+            Log.i(TAG, fallbackBuildStartMsg)
+            com.remmi.browser.util.DebugLogManager.log(fallbackBuildStartMsg)
 
-          Log.i(TAG, "[COMPILE_METRICS_UPDATE_START] jobId=$jobId")
+            parseToFallback(combinedDefaultRulesText, false)
+            parseToFallback(additionalRulesText, true)
+            
+            tempParsedRules.reverse()
+            newNetworkRules.addAll(0, tempParsedRules)
+
+            val fallbackBuildDoneMsg = formatForensicMarker(jobId, "[POST_COMPILE_FALLBACK_BUILD_DONE]", workerState = "EXECUTING")
+            Log.i(TAG, fallbackBuildDoneMsg)
+            com.remmi.browser.util.DebugLogManager.log(fallbackBuildDoneMsg)
+          }
+
+          val parseDoneMarkerMsg = formatForensicMarker(jobId, "[POST_COMPILE_RESULT_PARSE_DONE]", workerState = "EXECUTING")
+          Log.i(TAG, parseDoneMarkerMsg)
+          com.remmi.browser.util.DebugLogManager.log(parseDoneMarkerMsg)
+
+          val stateUpdateStartMsg = formatForensicMarker(jobId, "[POST_COMPILE_STATE_UPDATE_START]", workerState = "EXECUTING")
+          Log.i(TAG, stateUpdateStartMsg)
+          com.remmi.browser.util.DebugLogManager.log(stateUpdateStartMsg)
+
           if (!isNativeLoaded) {
             val parseDoneMsg = "[COMPILE_PARSE_DONE] parsedRules=$compiledCount ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
             Log.i(TAG, parseDoneMsg)
@@ -785,31 +841,70 @@ class AdblockBridge {
             Log.i(TAG, engineCreatedMsg)
             com.remmi.browser.util.DebugLogManager.log(engineCreatedMsg)
           }
-          Log.i(TAG, "[COMPILE_METRICS_UPDATE_DONE] jobId=$jobId")
 
-          // Single Atomic publication
-          val swapStartMsg = "[COMPILE_SWAP_START] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
-          Log.i(TAG, swapStartMsg)
-          com.remmi.browser.util.DebugLogManager.log(swapStartMsg)
-          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
+          var newGen = oldGen
+          // Single Atomic publication with swapLock
+          val swapWaitStart = android.os.SystemClock.elapsedRealtime()
+          val swapWaitStartMsg = formatForensicMarker(jobId, "[SWAP_LOCK_WAIT_START]", lockName = "swapLock", waitStart = swapWaitStart, workerState = "WAITING_ON_LOCK")
+          Log.i(TAG, swapWaitStartMsg)
+          com.remmi.browser.util.DebugLogManager.log(swapWaitStartMsg)
 
-          Log.i(TAG, "[GENERATION_UPDATE_START] jobId=$jobId")
-          val newGen = localEngineGeneration.incrementAndGet()
-          Log.i(TAG, "[GENERATION_UPDATE_DONE] jobId=$jobId")
-          
-          Log.i(TAG, "[ENGINE_STATE_UPDATE_START] jobId=$jobId")
-          activeFallbackEngine = FallbackEngineSet(
-            blockedHostnames = newBlockedHostnames,
-            blockedSubstrings = newBlockedSubstrings,
-            allowList = newAllowList,
-            fallbackNetworkRules = newNetworkRules,
-            fallbackCosmeticRules = newCosmeticRules,
-            fallbackAdditionalCosmeticRules = newAdditionalCosmeticRules,
-            fallbackProceduralFilters = newProceduralFilters,
-            fallbackCosmeticExceptions = newCosmeticExceptions,
-            generation = newGen
-          )
-          Log.i(TAG, "[ENGINE_STATE_UPDATE_DONE] jobId=$jobId")
+          synchronized(swapLock) {
+            val swapWaitEnd = android.os.SystemClock.elapsedRealtime()
+            val swapAcquiredMsg = formatForensicMarker(jobId, "[SWAP_LOCK_ACQUIRED]", lockName = "swapLock", waitStart = swapWaitStart, waitEnd = swapWaitEnd, workerState = "EXECUTING")
+            Log.i(TAG, swapAcquiredMsg)
+            com.remmi.browser.util.DebugLogManager.log(swapAcquiredMsg)
+
+            val swapStartMsg = formatForensicMarker(jobId, "[COMPILE_SWAP_START]", workerState = "EXECUTING")
+            Log.i(TAG, swapStartMsg)
+            com.remmi.browser.util.DebugLogManager.log(swapStartMsg)
+            com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
+
+            val genUpdateStartMsg = formatForensicMarker(jobId, "[GENERATION_UPDATE_START]", workerState = "EXECUTING")
+            Log.i(TAG, genUpdateStartMsg)
+            com.remmi.browser.util.DebugLogManager.log(genUpdateStartMsg)
+            newGen = localEngineGeneration.incrementAndGet()
+            val genUpdateDoneMsg = formatForensicMarker(jobId, "[GENERATION_UPDATE_DONE]", workerState = "EXECUTING", extra = "generation=$newGen")
+            Log.i(TAG, genUpdateDoneMsg)
+            com.remmi.browser.util.DebugLogManager.log(genUpdateDoneMsg)
+
+            val oldEngineExists = (activeFallbackEngine != null)
+            val oldReleaseStartTs = android.os.SystemClock.elapsedRealtime()
+            val oldReleaseStartMsg = formatForensicMarker(jobId, "[OLD_ENGINE_RELEASE_START]", workerState = "EXECUTING", extra = "oldEngineExists=$oldEngineExists")
+            Log.i(TAG, oldReleaseStartMsg)
+            com.remmi.browser.util.DebugLogManager.log(oldReleaseStartMsg)
+
+            val oldEngineReleaseTime = android.os.SystemClock.elapsedRealtime()
+            val oldReleaseDoneMsg = formatForensicMarker(jobId, "[OLD_ENGINE_RELEASE_DONE]", workerState = "EXECUTING", extra = "oldEngineExists=$oldEngineExists oldEngineReleaseTime=$oldEngineReleaseTime oldReleaseElapsedMs=${oldEngineReleaseTime - oldReleaseStartTs}ms")
+            Log.i(TAG, oldReleaseDoneMsg)
+            com.remmi.browser.util.DebugLogManager.log(oldReleaseDoneMsg)
+
+            val newEngineStartTs = android.os.SystemClock.elapsedRealtime()
+            val newPublishStartMsg = formatForensicMarker(jobId, "[NEW_ENGINE_PUBLISH_START]", workerState = "EXECUTING", extra = "newEngineExists=false")
+            Log.i(TAG, newPublishStartMsg)
+            com.remmi.browser.util.DebugLogManager.log(newPublishStartMsg)
+
+            activeFallbackEngine = FallbackEngineSet(
+              blockedHostnames = newBlockedHostnames,
+              blockedSubstrings = newBlockedSubstrings,
+              allowList = newAllowList,
+              fallbackNetworkRules = newNetworkRules,
+              fallbackCosmeticRules = newCosmeticRules,
+              fallbackAdditionalCosmeticRules = newAdditionalCosmeticRules,
+              fallbackProceduralFilters = newProceduralFilters,
+              fallbackCosmeticExceptions = newCosmeticExceptions,
+              generation = newGen
+            )
+
+            val newEnginePublishTime = android.os.SystemClock.elapsedRealtime()
+            val newPublishDoneMsg = formatForensicMarker(jobId, "[NEW_ENGINE_PUBLISH_DONE]", workerState = "EXECUTING", extra = "newEngineExists=true newEnginePublishTime=$newEnginePublishTime newPublishElapsedMs=${newEnginePublishTime - newEngineStartTs}ms generation=$newGen")
+            Log.i(TAG, newPublishDoneMsg)
+            com.remmi.browser.util.DebugLogManager.log(newPublishDoneMsg)
+
+            val stateUpdateDoneMsg = formatForensicMarker(jobId, "[POST_COMPILE_STATE_UPDATE_DONE]", workerState = "EXECUTING")
+            Log.i(TAG, stateUpdateDoneMsg)
+            com.remmi.browser.util.DebugLogManager.log(stateUpdateDoneMsg)
+          }
 
           com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
           val swapDoneMsg = "[COMPILE_SWAP_DONE] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
