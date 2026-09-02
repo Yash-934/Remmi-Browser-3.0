@@ -271,6 +271,7 @@ fun TabGridSheet(
   var selectedFilter by remember { mutableStateOf(TabFilter.ALL) }
   var searchQuery by remember { mutableStateOf("") }
   var selectedSpaceFilter by remember { mutableStateOf<String?>(null) } // null = all, "personal", "incognito", "tor", or groupId
+  var showSpacesMenu by remember { mutableStateOf(false) }
 
   // Select Mode State
   var isSelectMode by remember { mutableStateOf(false) }
@@ -580,22 +581,91 @@ fun TabGridSheet(
         }
 
         // [3 Dot / Close Menu]
-        Surface(
-          shape = RoundedCornerShape(10.dp),
-          color = surfaceCardColor,
-          border = BorderStroke(1.dp, borderColor),
-          modifier = Modifier
-            .size(36.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onDismiss)
-            .testTag("close_tabs_sheet_button")
-        ) {
-          Box(contentAlignment = Alignment.Center) {
-            Icon(
-              Icons.Default.MoreVert,
-              contentDescription = "Options",
-              tint = textPrimary,
-              modifier = Modifier.size(18.dp)
+        Box {
+          Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = surfaceCardColor,
+            border = BorderStroke(1.dp, borderColor),
+            modifier = Modifier
+              .size(36.dp)
+              .clip(RoundedCornerShape(10.dp))
+              .clickable { showSpacesMenu = true }
+              .testTag("close_tabs_sheet_button")
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              Icon(
+                Icons.Default.MoreVert,
+                contentDescription = "Options",
+                tint = textPrimary,
+                modifier = Modifier.size(18.dp)
+              )
+            }
+          }
+          
+          DropdownMenu(
+            expanded = showSpacesMenu,
+            onDismissRequest = { showSpacesMenu = false },
+            modifier = Modifier.background(surfaceCardColor)
+          ) {
+            DropdownMenuItem(
+              text = { Text("All Spaces", color = if (selectedSpaceFilter == null) activeAccentColor else textPrimary) },
+              leadingIcon = { Icon(Icons.Default.GridView, contentDescription = null, tint = if (selectedSpaceFilter == null) activeAccentColor else textPrimary, modifier = Modifier.size(20.dp)) },
+              onClick = { 
+                selectedSpaceFilter = null
+                showSpacesMenu = false
+              }
+            )
+            DropdownMenuItem(
+              text = { Text("Personal Space", color = if (selectedSpaceFilter == "personal") activeAccentColor else textPrimary) },
+              leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = if (selectedSpaceFilter == "personal") activeAccentColor else textPrimary, modifier = Modifier.size(20.dp)) },
+              onClick = { 
+                selectedSpaceFilter = "personal"
+                showSpacesMenu = false
+              }
+            )
+            DropdownMenuItem(
+              text = { Text("Incognito Space", color = if (selectedSpaceFilter == "incognito") activeAccentColor else textPrimary) },
+              leadingIcon = { Icon(painterResource(R.drawable.ic_incognito), contentDescription = null, tint = if (selectedSpaceFilter == "incognito") activeAccentColor else textPrimary, modifier = Modifier.size(20.dp)) },
+              onClick = { 
+                selectedSpaceFilter = "incognito"
+                showSpacesMenu = false
+              }
+            )
+            DropdownMenuItem(
+              text = { Text("Tor Space", color = if (selectedSpaceFilter == "tor") torPurple else textPrimary) },
+              leadingIcon = { Icon(painterResource(R.drawable.ic_tor), contentDescription = null, tint = if (selectedSpaceFilter == "tor") torPurple else textPrimary, modifier = Modifier.size(20.dp)) },
+              onClick = { 
+                selectedSpaceFilter = "tor"
+                showSpacesMenu = false
+              }
+            )
+            tabGroups.forEach { group ->
+               DropdownMenuItem(
+                 text = { Text(group.title, color = if (selectedSpaceFilter == group.id) Color(group.colorHex) else textPrimary) },
+                 leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null, tint = Color(group.colorHex), modifier = Modifier.size(20.dp)) },
+                 onClick = {
+                   selectedSpaceFilter = group.id
+                   showSpacesMenu = false
+                 }
+               )
+            }
+            HorizontalDivider(color = borderColor)
+            DropdownMenuItem(
+              text = { Text("Manage Spaces", color = textPrimary) },
+              leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null, tint = textPrimary, modifier = Modifier.size(20.dp)) },
+              onClick = { 
+                showCreateGroupDialog = true
+                showSpacesMenu = false
+              }
+            )
+            HorizontalDivider(color = borderColor)
+            DropdownMenuItem(
+              text = { Text("Close Tabs Switcher", color = textPrimary) },
+              leadingIcon = { Icon(Icons.Default.Close, contentDescription = null, tint = textPrimary, modifier = Modifier.size(20.dp)) },
+              onClick = { 
+                onDismiss()
+                showSpacesMenu = false
+              }
             )
           }
         }
@@ -611,102 +681,6 @@ fun TabGridSheet(
         .fillMaxWidth(),
       verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-      // SPACES SECTION
-      item {
-        Column(modifier = Modifier.fillMaxWidth()) {
-          Row(
-            modifier = Modifier
-              .fillMaxWidth()
-              .padding(horizontal = 2.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-          ) {
-            Text(
-              text = "SPACES",
-              color = textPrimary,
-              fontSize = 13.sp,
-              fontWeight = FontWeight.Bold,
-              letterSpacing = 0.8.sp
-            )
-            Text(
-              text = if (selectedSpaceFilter != null) "Show All" else "Manage",
-              color = activeAccentColor,
-              fontSize = 12.5.sp,
-              fontWeight = FontWeight.SemiBold,
-              modifier = Modifier
-                .clickable {
-                  if (selectedSpaceFilter != null) {
-                    selectedSpaceFilter = null
-                  } else {
-                    showCreateGroupDialog = true
-                  }
-                }
-                .padding(4.dp)
-            )
-          }
-
-          Spacer(modifier = Modifier.height(8.dp))
-
-          LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            contentPadding = PaddingValues(horizontal = 2.dp)
-          ) {
-            // Personal Space
-            item {
-              SpaceCard(
-                title = "Personal Space",
-                icon = { Icon(Icons.Default.Person, contentDescription = null, tint = activeAccentColor, modifier = Modifier.size(18.dp)) },
-                count = personalTabs.size,
-                accentColor = activeAccentColor,
-                isSelected = selectedSpaceFilter == "personal",
-                onClick = { selectedSpaceFilter = if (selectedSpaceFilter == "personal") null else "personal" }
-              )
-            }
-            // Incognito Space
-            item {
-              SpaceCard(
-                title = "Incognito Space",
-                icon = { Icon(painterResource(R.drawable.ic_incognito), contentDescription = null, tint = textSecondary, modifier = Modifier.size(18.dp)) },
-                count = incognitoTabs.size,
-                accentColor = textSecondary,
-                isSelected = selectedSpaceFilter == "incognito",
-                onClick = { selectedSpaceFilter = if (selectedSpaceFilter == "incognito") null else "incognito" }
-              )
-            }
-            // Tor Space
-            item {
-              SpaceCard(
-                title = "Tor Space",
-                icon = { Icon(painterResource(R.drawable.ic_tor), contentDescription = null, tint = torPurple, modifier = Modifier.size(18.dp)) },
-                count = torTabs.size,
-                accentColor = torPurple,
-                isSelected = selectedSpaceFilter == "tor",
-                onClick = { selectedSpaceFilter = if (selectedSpaceFilter == "tor") null else "tor" }
-              )
-            }
-            // Custom User Groups / Spaces
-            items(tabGroups, key = { "group_${it.id}" }) { group ->
-              val groupTabsCount = tabs.count { it.groupId == group.id }
-              SpaceCard(
-                title = group.title,
-                icon = { Icon(Icons.Default.Folder, contentDescription = null, tint = Color(group.colorHex), modifier = Modifier.size(18.dp)) },
-                count = groupTabsCount,
-                accentColor = Color(group.colorHex),
-                isSelected = selectedSpaceFilter == group.id,
-                onClick = { selectedSpaceFilter = if (selectedSpaceFilter == group.id) null else group.id },
-                onLongClick = { editingGroup = group }
-              )
-            }
-            // + New Space Card
-            item {
-              NewSpaceCard(
-                onClick = { showCreateGroupDialog = true }
-              )
-            }
-          }
-        }
-      }
-
       // TAB FILTERS SECTION (Chips: All, Recent, Active, Sleep)
       item {
         LazyRow(

@@ -166,6 +166,14 @@ object DebugLogManager {
     } catch (_: Throwable) {}
   }
 
+  fun getCurrentSessionEvents(limit: Int = MAX_BREADCRUMBS): List<String> {
+    return persistentBreadcrumbs.toList().takeLast(limit)
+  }
+
+  fun getPreviousSessionEvents(limit: Int = MAX_BREADCRUMBS): List<String> {
+    return previousSessionBreadcrumbs.toList().takeLast(limit)
+  }
+
   fun getRecentEvents(limit: Int = MAX_BREADCRUMBS): List<String> {
     val list = persistentBreadcrumbs.toList()
     return if (list.isNotEmpty()) {

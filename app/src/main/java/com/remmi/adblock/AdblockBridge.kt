@@ -605,7 +605,8 @@ class AdblockBridge {
     val pid = android.os.Process.myPid()
     val callerThread = Thread.currentThread()
 
-    Log.i(TAG, "[COMPILE_REQUEST] source=$source generation=$currentGen jobId=$jobId sessionId=$sess processPid=$pid")
+    val callerTrace = android.util.Log.getStackTraceString(Exception("Caller Trace"))
+    Log.i(TAG, "[COMPILE_REQUEST] source=$source generation=$currentGen jobId=$jobId sessionId=$sess processPid=$pid callerTrace=\n$callerTrace")
 
     if (android.os.Looper.myLooper() != null && android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
       Log.w(TAG, "[COMPILE_UI_THREAD] compileRules called on Main Looper Thread!")
@@ -685,12 +686,15 @@ class AdblockBridge {
               Log.i(TAG, engineCreatedMsg)
               com.remmi.browser.util.DebugLogManager.log(engineCreatedMsg)
               com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
+              val t = Thread.currentThread()
+              Log.i(TAG, "[NATIVE_COMPILE_RETURN] timestamp=${System.currentTimeMillis()} thread=${t.name} id=${t.id} UI_THREAD=${t == android.os.Looper.getMainLooper().thread} jobId=$jobId")
             } catch (e: Throwable) {
               com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
               Log.e(TAG, "Native compile rules failed: ${e.message}", e)
             }
           }
 
+          Log.i(TAG, "[COMPILE_RESULT_PARSE_START] jobId=$jobId")
           // Prepare new FallbackEngineSet completely before swap
           val newBlockedHostnames = mutableSetOf<String>()
           val newBlockedSubstrings = mutableListOf<String>()
@@ -770,7 +774,9 @@ class AdblockBridge {
 
           parseToFallback(combinedDefaultRulesText, false)
           parseToFallback(additionalRulesText, true)
+          Log.i(TAG, "[COMPILE_RESULT_PARSE_DONE] jobId=$jobId")
 
+          Log.i(TAG, "[COMPILE_METRICS_UPDATE_START] jobId=$jobId")
           if (!isNativeLoaded) {
             val parseDoneMsg = "[COMPILE_PARSE_DONE] parsedRules=$compiledCount ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
             Log.i(TAG, parseDoneMsg)
@@ -779,6 +785,7 @@ class AdblockBridge {
             Log.i(TAG, engineCreatedMsg)
             com.remmi.browser.util.DebugLogManager.log(engineCreatedMsg)
           }
+          Log.i(TAG, "[COMPILE_METRICS_UPDATE_DONE] jobId=$jobId")
 
           // Single Atomic publication
           val swapStartMsg = "[COMPILE_SWAP_START] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
@@ -786,7 +793,11 @@ class AdblockBridge {
           com.remmi.browser.util.DebugLogManager.log(swapStartMsg)
           com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
 
+          Log.i(TAG, "[GENERATION_UPDATE_START] jobId=$jobId")
           val newGen = localEngineGeneration.incrementAndGet()
+          Log.i(TAG, "[GENERATION_UPDATE_DONE] jobId=$jobId")
+          
+          Log.i(TAG, "[ENGINE_STATE_UPDATE_START] jobId=$jobId")
           activeFallbackEngine = FallbackEngineSet(
             blockedHostnames = newBlockedHostnames,
             blockedSubstrings = newBlockedSubstrings,
@@ -798,6 +809,8 @@ class AdblockBridge {
             fallbackCosmeticExceptions = newCosmeticExceptions,
             generation = newGen
           )
+          Log.i(TAG, "[ENGINE_STATE_UPDATE_DONE] jobId=$jobId")
+
           com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
           val swapDoneMsg = "[COMPILE_SWAP_DONE] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
           Log.i(TAG, swapDoneMsg)

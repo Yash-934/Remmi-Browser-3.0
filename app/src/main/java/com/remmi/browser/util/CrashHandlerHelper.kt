@@ -735,15 +735,27 @@ object CrashHandlerHelper {
     val shieldState = "ENABLED"
     val webExtState = "REGISTERED"
 
-    val recentBreadcrumbs = try {
-      DebugLogManager.getRecentEvents(100)
+    val currentBreadcrumbs = try {
+      DebugLogManager.getCurrentSessionEvents(100)
     } catch (_: Throwable) {
       emptyList()
     }
-    val breadcrumbText = if (recentBreadcrumbs.isNotEmpty()) {
-      recentBreadcrumbs.joinToString("\n")
+    val previousBreadcrumbs = try {
+      DebugLogManager.getPreviousSessionEvents(100)
+    } catch (_: Throwable) {
+      emptyList()
+    }
+    
+    val currentBreadcrumbText = if (currentBreadcrumbs.isNotEmpty()) {
+      currentBreadcrumbs.joinToString("\n")
     } else {
-      "No diagnostic events recorded"
+      "No diagnostic events recorded for current session"
+    }
+    
+    val previousBreadcrumbText = if (previousBreadcrumbs.isNotEmpty()) {
+      previousBreadcrumbs.joinToString("\n")
+    } else {
+      "No diagnostic events recorded for previous session"
     }
 
     val currentSessionLastEvent = DebugLogManager.getLastCurrentSessionEvent()
@@ -852,8 +864,11 @@ Ghost: $ghostState
 Shield: $shieldState
 WebExtension: $webExtState
 
-RECENT DIAGNOSTIC EVENTS (LAST 100):
-$breadcrumbText
+PREVIOUS SESSION DIAGNOSTIC EVENTS (LAST 100):
+$previousBreadcrumbText
+
+CURRENT SESSION DIAGNOSTIC EVENTS (LAST 100):
+$currentBreadcrumbText
 
 JAVA EXCEPTION:
 ${if (throwable != null) """
@@ -863,7 +878,7 @@ Stacktrace:
 $stackTrace
 """.trimIndent() else "N/A"}
 
-NATIVE CRASH FORENSICS:
+ABNORMAL TERMINATION FORENSICS:
 ${if (throwable == null) """
 Classification: ${classification.name}
 Signal: $detectedSignal
