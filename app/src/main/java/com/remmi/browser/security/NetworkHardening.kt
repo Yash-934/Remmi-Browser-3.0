@@ -237,22 +237,15 @@ object NetworkHardening {
 
     DebugLogManager.log("[ROUTE] PHASE_A_START count=${routingPrefs.size}")
 
-    val phaseAFailures = mutableListOf<String>()
-    for ((name, value) in routingPrefs) {
-      val success = prefController.applyCriticalPreference(
-        name = name,
-        value = value,
-        branch = GeckoPreferenceController.PREF_BRANCH_USER
-      )
-      if (!success) {
-        phaseAFailures.add(name)
-      }
-    }
+    val batchSuccess = prefController.applyPreferences(
+      prefs = routingPrefs.toMap(),
+      branch = GeckoPreferenceController.PREF_BRANCH_USER
+    )
 
-    if (phaseAFailures.isNotEmpty()) {
+    if (!batchSuccess) {
       rollbackGhostRouting(runtime, generation)
-      Log.e(TAG, "[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures (rolled back to Shield)")
-      DebugLogManager.log("[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures (rolled back to Shield)")
+      Log.e(TAG, "[ROUTE] PHASE_A_FAILED port=$port (rolled back to Shield)")
+      DebugLogManager.log("[ROUTE] PHASE_A_FAILED port=$port (rolled back to Shield)")
       return false
     }
 
@@ -337,6 +330,7 @@ object NetworkHardening {
 
   fun resetAppliedState() {
     lastAppliedRouteKey = null
+    GeckoPreferenceController.resetCache()
   }
 
   fun sanitizeUrl(rawUrl: String): String {

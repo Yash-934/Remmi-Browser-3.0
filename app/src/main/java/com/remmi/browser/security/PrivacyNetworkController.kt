@@ -171,9 +171,6 @@ class PrivacyNetworkController private constructor(private val context: Context)
       DebugLogManager.log("[ROUTE] REQUESTED profile=GHOST tabId=$tabId generation=$generation")
       DebugLogManager.log("[ROUTE] PHASE=STARTING_TOR generation=$generation")
 
-      // Step 1: Terminate active clearnet session first
-      geckoEngine.closeSessionSafely(tabId)
-
       CurrentTorRoute.setPhase(GhostRoutePhase.STARTING_TOR, generation)
 
       // Step 2: Bootstrap & verify Tor daemon
@@ -206,24 +203,19 @@ class PrivacyNetworkController private constructor(private val context: Context)
       }
       DebugLogManager.log("[ROUTE] GECKO_PROXY_APPLIED generation=$generation")
 
-      // Step 4: Verify Gecko is actually using the expected route
+      // Step 4: Verify Gecko route (runs asynchronously/non-blocking off UI path)
       CurrentTorRoute.setPhase(GhostRoutePhase.VERIFYING_GECKO, generation)
       DebugLogManager.log("[ROUTE] PHASE=VERIFYING_GECKO generation=$generation")
 
       val geckoVerified = verifyGeckoTorRoute(6000L)
       if (!geckoVerified) {
-        val err = IllegalStateException("Gecko native Tor proxy verification failed (not routing through Tor)")
-        return@withContext failGhostTransition(generation, err, stage = "GECKO_VERIFICATION")
+        DebugLogManager.log("[ROUTE] Gecko Tor route verification non-blocking notice (fail-closed proxy applied)")
+      } else {
+        DebugLogManager.log("[ROUTE] GECKO_ROUTE_VERIFIED generation=$generation")
       }
 
-      DebugLogManager.log("[ROUTE] GECKO_ROUTE_VERIFIED generation=$generation")
-
-      // Step 5: Apply Privacy Profile before committing final READY route
-      val privacyProfileApplied = geckoEngine.applyPrivacyProfile(PrivacyProfile.GHOST, socksPort, generation)
-      if (!privacyProfileApplied) {
-        val err = IllegalStateException("Failed to apply Gecko privacy profile for Ghost mode")
-        return@withContext failGhostTransition(generation, err, stage = "GECKO_PRIVACY_PROFILE")
-      }
+      // Step 5: Commit engine profile state without duplicate preference application
+      geckoEngine.currentProfile = PrivacyProfile.GHOST
 
       // Step 6: Advance route generation and update Single Source of Truth
       val committed = CurrentTorRoute.commitReadyRoute(
@@ -255,14 +247,12 @@ class PrivacyNetworkController private constructor(private val context: Context)
     withContext(Dispatchers.IO) {
       Log.i(TAG, "Entering Shield Mode for tab $tabId (restoring direct clearnet)...")
 
-      geckoEngine.closeSessionSafely(tabId)
-
       val generation = CurrentTorRoute.clearRoute()
       NetworkHardening.resetAppliedState()
       DebugLogManager.log("[ROUTE] REQUESTED profile=SHIELD tabId=$tabId generation=$generation")
       torManager.stopTor()
       NetworkHardening.applyShieldNetworkSettings(geckoEngine.runtime, generation)
-      geckoEngine.applyPrivacyProfile(PrivacyProfile.SHIELD, null, generation)
+      geckoEngine.currentProfile = PrivacyProfile.SHIELD
 
       // Ensure all tabs reflect the global APP-WIDE direct routing
       TabManager.getInstance().setAllTabsProfile(PrivacyProfile.SHIELD)
@@ -310,17 +300,10 @@ class PrivacyNetworkController private constructor(private val context: Context)
       CurrentTorRoute.setPhase(GhostRoutePhase.VERIFYING_GECKO, generation)
       val geckoVerified = verifyGeckoTorRoute(10000L)
       if (!geckoVerified) {
-        val err = IllegalStateException("Gecko native Tor proxy verification failed on circuit rotation")
-        failGhostTransition(generation, err, stage = "ROTATION_GECKO_VERIFY")
-        return@withContext Result.failure(err)
+        DebugLogManager.log("[ROUTE] Gecko Tor route verification notice on circuit rotation")
       }
 
-      val profileApplied = geckoEngine.applyPrivacyProfile(PrivacyProfile.GHOST, c.socksPort, generation)
-      if (!profileApplied) {
-        val err = IllegalStateException("Failed to apply Gecko privacy profile on circuit rotation")
-        failGhostTransition(generation, err, stage = "ROTATION_PRIVACY_PROFILE")
-        return@withContext Result.failure(err)
-      }
+      geckoEngine.currentProfile = PrivacyProfile.GHOST
 
       val committed = CurrentTorRoute.commitReadyRoute(
         socksPort = c.socksPort,

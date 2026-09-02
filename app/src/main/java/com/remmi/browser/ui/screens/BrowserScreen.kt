@@ -288,12 +288,11 @@ fun BrowserScreen(
 
   var lastBackPressTime by remember { mutableLongStateOf(0L) }
 
-  // Restore previous session tabs on startup if enabled (Always erase Incognito / Ghost tabs on launch)
+  // Restore previous session tabs on startup if enabled (Always erase Incognito / Ghost tabs from disk on launch)
   LaunchedEffect(Unit) {
     withContext(Dispatchers.IO) {
       val db = RemmiDatabase.getDatabaseAsync(context)
       db.sessionTabDao().clearPrivateTabs()
-      tabManager.purgePrivateTabs()
 
       if (tabManager.tabs.value.isNotEmpty() && (tabManager.tabs.value.size > 1 || tabManager.tabs.value[0].url != "about:blank")) {
         // Memory state already contains active tabs (e.g. returning from Settings or other screens)
@@ -351,7 +350,7 @@ fun BrowserScreen(
     }
   }
 
-  // Purge private tabs whenever the app is brought to the foreground
+  // Ensure private tabs are never persisted to disk across restarts
   DisposableEffect(lifecycleOwner) {
     val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
       if (event == androidx.lifecycle.Lifecycle.Event.ON_START) {
@@ -359,7 +358,6 @@ fun BrowserScreen(
           val db = RemmiDatabase.getDatabaseAsync(context)
           db.sessionTabDao().clearPrivateTabs()
         }
-        tabManager.purgePrivateTabs()
       }
     }
     lifecycleOwner.lifecycle.addObserver(observer)
@@ -857,18 +855,22 @@ fun BrowserScreen(
             onTitleChange = { newTitle ->
               tabManager.updateTab(activeTab.id) { it.copy(title = newTitle) }
             },
-            onProgressChange = { p ->
-              tabManager.updateTab(activeTab.id) { it.copy(progress = p) }
-            },
+            onProgressChange = { /* handled locally in BrowserView to avoid recomposition churn */ },
             onLoadingChange = { loading ->
-              tabManager.updateTab(activeTab.id) { it.copy(isLoading = loading) }
+              if (activeTab.isLoading != loading) {
+                tabManager.updateTab(activeTab.id) { it.copy(isLoading = loading) }
+              }
             },
             onSecurityChange = { secure ->
-              tabManager.updateTab(activeTab.id) { it.copy(isSecure = secure) }
+              if (activeTab.isSecure != secure) {
+                tabManager.updateTab(activeTab.id) { it.copy(isSecure = secure) }
+              }
             },
             onNavStateChange = { canBack, canForward ->
-              tabManager.updateTab(activeTab.id) {
-                it.copy(canGoBack = canBack, canGoForward = canForward)
+              if (activeTab.canGoBack != canBack || activeTab.canGoForward != canForward) {
+                tabManager.updateTab(activeTab.id) {
+                  it.copy(canGoBack = canBack, canGoForward = canForward)
+                }
               }
             },
             onTrackerBlocked = { url, domain ->

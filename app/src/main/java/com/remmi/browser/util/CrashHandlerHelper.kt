@@ -169,24 +169,20 @@ object CrashHandlerHelper {
         )
 
         val reportTimestamp = System.currentTimeMillis()
-        HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
-          prefs.edit()
-            .putString(KEY_PENDING_REPORT, abnormalReport)
-            .putLong(KEY_PENDING_TIMESTAMP, reportTimestamp)
-            .putString(KEY_PENDING_TYPE, ReportType.ABNORMAL_TERMINATION.name)
-            .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, false)
-            .commit()
-        }
+        prefs.edit()
+          .putString(KEY_PENDING_REPORT, abnormalReport)
+          .putLong(KEY_PENDING_TIMESTAMP, reportTimestamp)
+          .putString(KEY_PENDING_TYPE, ReportType.ABNORMAL_TERMINATION.name)
+          .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, false)
+          .apply()
 
         // Immediate persistence of abnormal termination report
         val exportPath = saveToDownloads(context, abnormalReport, reportTimestamp, ReportType.ABNORMAL_TERMINATION)
         if (exportPath != null) {
-          HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
-            prefs.edit()
-              .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, true)
-              .putString(KEY_PENDING_SAVED_PATH, exportPath)
-              .commit()
-          }
+          prefs.edit()
+            .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, true)
+            .putString(KEY_PENDING_SAVED_PATH, exportPath)
+            .apply()
         }
       }
 
@@ -196,19 +192,17 @@ object CrashHandlerHelper {
       currentPhase = StartupPhase.PROCESS_START
       currentSessionLastNativeOp = "NONE"
 
-      HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
-        prefs.edit()
-          .putBoolean(KEY_PREVIOUS_RUN_CLEAN, false)
-          .putLong(KEY_STARTUP_TIMESTAMP, currentProcessStartTimestamp)
-          .putString(KEY_STARTUP_SESSION_ID, newSessionId)
-          .putInt(KEY_STARTUP_PROCESS_PID, currentProcessPid)
-          .putString(KEY_STARTUP_PHASE, StartupPhase.PROCESS_START.id)
-          .putString(KEY_LAST_NATIVE_OP, "NONE")
-          .putString(KEY_PREVIOUS_SESSION_ID, previousSessionId)
-          .putInt(KEY_PREVIOUS_PROCESS_PID, previousProcessPid)
-          .putString(KEY_PREVIOUS_LAST_NATIVE_OP, previousSessionLastNativeOp)
-          .commit()
-      }
+      prefs.edit()
+        .putBoolean(KEY_PREVIOUS_RUN_CLEAN, false)
+        .putLong(KEY_STARTUP_TIMESTAMP, currentProcessStartTimestamp)
+        .putString(KEY_STARTUP_SESSION_ID, newSessionId)
+        .putInt(KEY_STARTUP_PROCESS_PID, currentProcessPid)
+        .putString(KEY_STARTUP_PHASE, StartupPhase.PROCESS_START.id)
+        .putString(KEY_LAST_NATIVE_OP, "NONE")
+        .putString(KEY_PREVIOUS_SESSION_ID, previousSessionId)
+        .putInt(KEY_PREVIOUS_PROCESS_PID, previousProcessPid)
+        .putString(KEY_PREVIOUS_LAST_NATIVE_OP, previousSessionLastNativeOp)
+        .apply()
 
       DebugLogManager.log("[APP_LIFECYCLE] PROCESS_START (session=$newSessionId, pid=$currentProcessPid)")
     } catch (e: Throwable) {
@@ -277,13 +271,11 @@ object CrashHandlerHelper {
     try {
       currentPhase = StartupPhase.SHUTDOWN
       val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-      HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
-        prefs.edit()
-          .putBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
-          .putString(KEY_STARTUP_PHASE, StartupPhase.SHUTDOWN.id)
-          .putLong(KEY_LAST_CLEAN_TIMESTAMP, System.currentTimeMillis())
-          .commit()
-      }
+      prefs.edit()
+        .putBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
+        .putString(KEY_STARTUP_PHASE, StartupPhase.SHUTDOWN.id)
+        .putLong(KEY_LAST_CLEAN_TIMESTAMP, System.currentTimeMillis())
+        .apply()
 
       DebugLogManager.log("[APP_LIFECYCLE] SHUTDOWN")
     } catch (e: Throwable) {

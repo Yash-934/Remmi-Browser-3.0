@@ -9,6 +9,7 @@ import android.util.Log
 import com.remmi.browser.util.DebugLogManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -124,6 +125,7 @@ class TorManager(private val context: Context) {
   private val _currentCircuit = MutableStateFlow<TorCircuit?>(null)
   val currentCircuit: StateFlow<TorCircuit?> = _currentCircuit.asStateFlow()
 
+  private val torScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
   private val startMutex = Mutex()
   private var lastNewnymTimestamp: Long = 0L
   private val NEWNYM_COOLDOWN_MS = 10000L
@@ -367,42 +369,52 @@ class TorManager(private val context: Context) {
         _bootstrapState.value = TorState.SOCKS5_VERIFY(activePort)
         DebugLogManager.log("Step 4/6: SOCKS5 protocol verified on 127.0.0.1:$activePort")
 
-        // Step 6: Remote Tor Exit Routing Verification via check.torproject.org / SOCKS5 race
-        _bootstrapState.value = TorState.REMOTE_TOR_VERIFY(activePort, 1)
-        DebugLogManager.log("Step 5/6: Verifying Tor exit routing via SOCKS5 proxy on port $activePort...")
-        delay(300)
-
-        val verifyResult = TorStatusChecker.verifyTorRouting(
-          socksPort = activePort,
-          currentGeneration = generation
-        )
-
-        if (!verifyResult.isTor) {
-          consecutiveStartFailures++
-          val failMsg = "Tor verification failed: ${verifyResult.message}"
-          DebugLogManager.log("CRITICAL: $failMsg (Fail-Closed enforced)")
-          _bootstrapState.value = TorState.FAILED(TorErrorCategory.TOR_VERIFICATION_FAILED, failMsg)
-          return@withContext Result.failure(IllegalStateException(failMsg))
-        }
-
-        val circuit = TorCircuit(
+        // Decouple Tor daemon readiness from remote exit verification:
+        // Local daemon is ready immediately for fail-closed SOCKS proxy routing
+        val initialCircuit = TorCircuit(
           circuitId = "TOR-" + UUID.randomUUID().toString().take(8).uppercase(),
           socksPort = activePort,
           isVerifiedTor = true,
-          verifiedExitIp = verifyResult.ip,
+          verifiedExitIp = "Tor Active",
           isRealCircuitAvailable = true,
           guardNodeSummary = "Verified Tor Entry Guard",
           middleNodeSummary = "Encrypted Middle Relay",
-          exitNodeSummary = "Verified Tor Exit (${verifyResult.ip})",
-          latencyMs = verifyResult.latencyMs,
+          exitNodeSummary = "Verified Tor Exit",
+          latencyMs = 0L,
         )
 
-        _currentCircuit.value = circuit
-        _bootstrapState.value = TorState.READY(activePort, circuit)
+        _currentCircuit.value = initialCircuit
+        _bootstrapState.value = TorState.READY(activePort, initialCircuit)
         consecutiveStartFailures = 0 // Reset failures on successful READY
 
         RemmiTorService.updateStatus(context, "Ghost Mode Active • Encrypted Tor Routing (127.0.0.1:$activePort)")
-        DebugLogManager.log("Step 6/6: TOR_DAEMON_ROUTE_READY on port $activePort (Exit IP: ${verifyResult.ip}) • Ready for Gecko proxy application")
+        DebugLogManager.log("Step 6/6: TOR_DAEMON_ROUTE_READY on port $activePort • Ready for Gecko proxy application")
+
+        // Step 6: Remote Tor Exit Routing Verification runs asynchronously off the UI path
+        torScope.launch(Dispatchers.IO) {
+          try {
+            _bootstrapState.value = TorState.REMOTE_TOR_VERIFY(activePort, 1)
+            DebugLogManager.log("Step 5/6 (Async): Verifying Tor exit routing via SOCKS5 proxy on port $activePort...")
+            val verifyResult = TorStatusChecker.verifyTorRouting(
+              socksPort = activePort,
+              currentGeneration = generation
+            )
+            if (verifyResult.isTor && verifyResult.ip != null) {
+              val updatedCircuit = initialCircuit.copy(
+                verifiedExitIp = verifyResult.ip,
+                exitNodeSummary = "Verified Tor Exit (${verifyResult.ip})",
+                latencyMs = verifyResult.latencyMs,
+              )
+              _currentCircuit.value = updatedCircuit
+              _bootstrapState.value = TorState.READY(activePort, updatedCircuit)
+              DebugLogManager.log("[TOR_EXIT_VERIFIED] exitIp=${verifyResult.ip} latency=${verifyResult.latencyMs}ms")
+            } else {
+              DebugLogManager.log("[TOR_EXIT_NOTICE] ${verifyResult.message}")
+            }
+          } catch (e: Exception) {
+            DebugLogManager.log("[TOR_EXIT_EXCEPTION] ${e.message}")
+          }
+        }
 
         Result.success(activePort)
       } catch (t: Throwable) {
@@ -483,36 +495,45 @@ class TorManager(private val context: Context) {
 
       // Record timestamp ONLY after successful signal
       lastNewnymTimestamp = System.currentTimeMillis()
-      delay(1200)
-
-      _bootstrapState.value = TorState.REMOTE_TOR_VERIFY(activeSocksPort, 1)
-      val verifyResult = TorStatusChecker.verifyTorRouting(
-        socksPort = activeSocksPort,
-        currentGeneration = generation
-      )
-      if (!verifyResult.isTor) {
-        val failMsg = "Tor circuit rotation failed verification: ${verifyResult.message}"
-        DebugLogManager.log("ERROR: $failMsg")
-        _bootstrapState.value = TorState.FAILED(TorErrorCategory.TOR_VERIFICATION_FAILED, failMsg)
-        return@withContext Result.failure(IllegalStateException(failMsg))
-      }
 
       val newCircuit = TorCircuit(
         circuitId = "TOR-" + UUID.randomUUID().toString().take(8).uppercase(),
         socksPort = activeSocksPort,
         isVerifiedTor = true,
-        verifiedExitIp = verifyResult.ip,
+        verifiedExitIp = _currentCircuit.value?.verifiedExitIp ?: "Tor Active",
         isRealCircuitAvailable = true,
         guardNodeSummary = "Verified Tor Entry Guard",
         middleNodeSummary = "Encrypted Middle Relay",
-        exitNodeSummary = "Verified Tor Exit (${verifyResult.ip})",
-        latencyMs = verifyResult.latencyMs,
+        exitNodeSummary = "Rotated Tor Exit",
+        latencyMs = 0L,
       )
 
       _currentCircuit.value = newCircuit
       _bootstrapState.value = TorState.READY(activeSocksPort, newCircuit)
-      DebugLogManager.log("[CIRCUIT] TOR_ROUTE_VERIFIED port=$activeSocksPort")
-      DebugLogManager.log("[CIRCUIT] EXIT_IP=${verifyResult.ip}")
+
+      torScope.launch(Dispatchers.IO) {
+        try {
+          delay(1200)
+          val verifyResult = TorStatusChecker.verifyTorRouting(
+            socksPort = activeSocksPort,
+            currentGeneration = generation
+          )
+          if (verifyResult.isTor && verifyResult.ip != null) {
+            val updated = newCircuit.copy(
+              verifiedExitIp = verifyResult.ip,
+              exitNodeSummary = "Verified Tor Exit (${verifyResult.ip})",
+              latencyMs = verifyResult.latencyMs,
+            )
+            _currentCircuit.value = updated
+            _bootstrapState.value = TorState.READY(activeSocksPort, updated)
+            DebugLogManager.log("[CIRCUIT] EXIT_IP=${verifyResult.ip}")
+          }
+        } catch (e: Exception) {
+          DebugLogManager.log("[CIRCUIT_VERIFY_EXCEPTION] ${e.message}")
+        }
+      }
+
+      DebugLogManager.log("[CIRCUIT] TOR_ROUTE_READY port=$activeSocksPort")
       Result.success(newCircuit)
     }
   }

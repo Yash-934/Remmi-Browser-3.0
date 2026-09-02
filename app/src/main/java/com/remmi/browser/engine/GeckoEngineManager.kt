@@ -116,7 +116,8 @@ class GeckoEngineManager private constructor(private val context: Context) {
   @Volatile
   private var initDeferred: CompletableDeferred<GeckoRuntime>? = null
 
-  private var currentProfile: PrivacyProfile = PrivacyProfile.SHIELD
+  @Volatile
+  var currentProfile: PrivacyProfile = PrivacyProfile.SHIELD
   private val activeSessions = mutableMapOf<String, GeckoSession>()
   private val sessionCallbacks = mutableMapOf<String, GeckoTabCallbacks>()
   private val sessionNavStates = mutableMapOf<String, Pair<Boolean, Boolean>>()

@@ -32,6 +32,12 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
     val REQUIRED_GHOST_PRIVACY = setOf(
       "media.peerconnection.enabled"
     )
+
+    private val appliedPrefsCache = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    fun resetCache() {
+      appliedPrefsCache.clear()
+    }
   }
 
   suspend fun getPreferences(keys: List<String>): Result<Map<String, Any?>> = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
@@ -65,6 +71,11 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
     value: Any,
     branch: Int = PREF_BRANCH_USER
   ): Boolean = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+    if (appliedPrefsCache[name] == value) {
+      if (cont.isActive) cont.resume(true)
+      return@suspendCancellableCoroutine
+    }
+
     val setter: SetGeckoPreference<*> = when (value) {
       is String -> SetGeckoPreference.setStringPref(name, value, branch)
       is Int -> SetGeckoPreference.setIntPref(name, value, branch)
@@ -84,6 +95,9 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
         NativePrefCtrl.setGeckoPrefs(mutableListOf(setter)).accept(
           { result ->
             val success = result?.get(name) == true
+            if (success) {
+              appliedPrefsCache[name] = value
+            }
             DebugLogManager.log("[GECKO_PHASE_A_PREF_RESULT] key=$name success=$success")
             if (cont.isActive) {
               cont.resume(success)
@@ -115,8 +129,15 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
       return@suspendCancellableCoroutine
     }
 
+    val changedPrefs = prefs.filter { (k, v) -> appliedPrefsCache[k] != v }
+    if (changedPrefs.isEmpty()) {
+      DebugLogManager.log("[GECKO_PREFS] IDEMPOTENT_SKIP all ${prefs.size} preferences already active")
+      cont.resume(true)
+      return@suspendCancellableCoroutine
+    }
+
     val setList = mutableListOf<SetGeckoPreference<*>>()
-    for ((name, value) in prefs) {
+    for ((name, value) in changedPrefs) {
       when (value) {
         is String -> setList.add(SetGeckoPreference.setStringPref(name, value, branch))
         is Int -> setList.add(SetGeckoPreference.setIntPref(name, value, branch))
@@ -155,8 +176,11 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
             val criticalFailedList = mutableListOf<String>()
             val failedList = mutableListOf<String>()
 
-            for ((name, value) in prefs) {
+            for ((name, value) in changedPrefs) {
               val success = resultMap[name] == true
+              if (success) {
+                appliedPrefsCache[name] = value
+              }
               total++
               if (success) successful++ else failed++
               
