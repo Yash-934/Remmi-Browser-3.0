@@ -579,8 +579,13 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "GET_HIDDEN_CLASS_ID_SELECTORS") {
+    const senderTabId = sender?.tab?.id || "unknown";
+    const senderFrameId = sender?.frameId || 0;
+    const senderUrl = sender?.url || sender?.tab?.url || "unknown";
+
     // COSMETIC ISOLATION: Until network blocking is healthy, cosmetic traffic must be disabled or strictly deferred
     if (portState !== "HEALTHY") {
+      logToNative(`[FORENSIC] GET_HIDDEN_CLASS_ID_SELECTORS | tabId=${senderTabId} frameId=${senderFrameId} url=${senderUrl} reason=PORT_UNHEALTHY classes=${(message.classes || []).length} ids=${(message.ids || []).length} cache=SKIP`);
       if (sendResponse) sendResponse({ ok: true, hideSelectors: [] });
       return true;
     }
@@ -597,9 +602,12 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     const cached = getCachedCosmetic(cacheKey);
     if (cached) {
+      logToNative(`[FORENSIC] GET_HIDDEN_CLASS_ID_SELECTORS | tabId=${senderTabId} frameId=${senderFrameId} url=${senderUrl} reason=NORMAL classes=${classes.length} ids=${ids.length} cache=HIT`);
       if (sendResponse) sendResponse(cached);
       return true;
     }
+
+    logToNative(`[FORENSIC] GET_HIDDEN_CLASS_ID_SELECTORS | tabId=${senderTabId} frameId=${senderFrameId} url=${senderUrl} reason=NORMAL classes=${classes.length} ids=${ids.length} cache=MISS`);
 
     if (INFLIGHT_COSMETIC.has(cacheKey)) {
       INFLIGHT_COSMETIC.get(cacheKey).then((data) => {

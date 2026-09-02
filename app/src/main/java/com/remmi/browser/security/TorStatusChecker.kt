@@ -181,7 +181,9 @@ object TorStatusChecker {
    * with 25s deadline and race orchestration.
    */
   suspend fun verifyTorRouting(socksPort: Int? = CurrentTorRoute.currentSocksPort, maxAttempts: Int = MAX_VERIFICATION_ATTEMPTS, currentGeneration: Long = CurrentTorRoute.currentGeneration): TorStatusResult =
-    withContext(Dispatchers.IO) {
+    try {
+      withContext(Dispatchers.IO) {
+        Log.i("TorStatusChecker", "[FORENSIC] TOR_VERIFY_START port=$socksPort generation=$currentGeneration")
       if (socksPort == null || socksPort <= 0) {
         return@withContext TorStatusResult(
           isTor = false,
@@ -280,6 +282,7 @@ object TorStatusChecker {
           }
 
           if (raceResult != null && raceResult.isTor) {
+            Log.i("TorStatusChecker", "[FORENSIC] TOR_VERIFY_COMPLETE (success) port=$socksPort ip=${raceResult.ip} generation=$currentGeneration")
             return@withTimeoutOrNull raceResult
           }
 
@@ -289,6 +292,7 @@ object TorStatusChecker {
         }
 
         val totalElapsed = System.currentTimeMillis() - startTime
+        Log.e("TorStatusChecker", "[FORENSIC] TOR_VERIFY_COMPLETE (exhausted) port=$socksPort attempts=$maxAttempts generation=$currentGeneration")
         TorStatusResult(
           isTor = false,
           ip = "Verification Failed",
@@ -297,14 +301,17 @@ object TorStatusChecker {
           socksHandshakePassed = true,
           attemptsMade = maxAttempts,
         )
-      } ?: TorStatusResult(
-        isTor = false,
-        ip = "Timeout",
-        message = "Tor verification timed out after ${TOR_VERIFY_TOTAL_TIMEOUT_MS / 1000}s",
-        latencyMs = TOR_VERIFY_TOTAL_TIMEOUT_MS,
-        socksHandshakePassed = true,
-        attemptsMade = maxAttempts,
-      )
+      } ?: run {
+        Log.e("TorStatusChecker", "[FORENSIC] TOR_VERIFY_TIMEOUT port=$socksPort timeoutMs=$TOR_VERIFY_TOTAL_TIMEOUT_MS generation=$currentGeneration")
+        TorStatusResult(
+          isTor = false,
+          ip = "Timeout",
+          message = "Tor verification timed out after ${TOR_VERIFY_TOTAL_TIMEOUT_MS / 1000}s",
+          latencyMs = TOR_VERIFY_TOTAL_TIMEOUT_MS,
+          socksHandshakePassed = true,
+          attemptsMade = maxAttempts,
+        )
+      }
     }
 }
 

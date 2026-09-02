@@ -383,8 +383,10 @@ class GeckoEngineManager private constructor(private val context: Context) {
     val existing = activeSessions[tabId]
     if (existing != null) {
       if (existing.isOpen) {
+        Log.i(TAG, "[FORENSIC] GECKO_SESSION REUSED id=$tabId (isOpen=true)")
         return existing
       }
+      Log.i(TAG, "[FORENSIC] GECKO_SESSION REPLACED id=$tabId (isOpen=false)")
       try {
         existing.navigationDelegate = null
         existing.progressDelegate = null
@@ -393,6 +395,8 @@ class GeckoEngineManager private constructor(private val context: Context) {
       } catch (e: Exception) {
         Log.w(TAG, "[GECKO] Cleanup of defunct session notice on tabId=$tabId: ${e.message}")
       }
+    } else {
+      Log.i(TAG, "[FORENSIC] GECKO_SESSION CREATED id=$tabId (first time)")
     }
 
     val newSession = createSessionInternal(profile, securityLevel, containerType, isDesktopMode)
@@ -403,6 +407,7 @@ class GeckoEngineManager private constructor(private val context: Context) {
     newSession.navigationDelegate = object : GeckoSession.NavigationDelegate {
       override fun onLoadRequest(session: GeckoSession, request: GeckoSession.NavigationDelegate.LoadRequest): GeckoResult<AllowOrDeny>? {
         val url = request.uri ?: ""
+        Log.i(TAG, "[FORENSIC] NAV_START tabId=$tabId url=$url")
         val tab = TabManager.getInstance().getTab(tabId)
         val isGhost = (tab?.profile == PrivacyProfile.GHOST) || (currentProfile == PrivacyProfile.GHOST)
         
@@ -432,6 +437,7 @@ class GeckoEngineManager private constructor(private val context: Context) {
         perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
         hasUserGesture: Boolean
       ) {
+        Log.i(TAG, "[FORENSIC] NAV_COMMIT tabId=$tabId url=$url")
         url?.let {
           if (it.isNotBlank() && it != "about:blank") {
             try {
@@ -463,11 +469,13 @@ class GeckoEngineManager private constructor(private val context: Context) {
     // Wire Progress delegate
     newSession.progressDelegate = object : GeckoSession.ProgressDelegate {
       override fun onPageStart(session: GeckoSession, url: String) {
+        Log.i(TAG, "[FORENSIC] NAV_PROGRESS (start) tabId=$tabId url=$url")
         sessionCallbacks[tabId]?.onLoadingChange(true)
         sessionCallbacks[tabId]?.onProgressChange(10)
       }
 
       override fun onPageStop(session: GeckoSession, success: Boolean) {
+        Log.i(TAG, "[FORENSIC] NAV_STOP tabId=$tabId success=$success")
         sessionCallbacks[tabId]?.onLoadingChange(false)
         sessionCallbacks[tabId]?.onProgressChange(100)
       }
@@ -486,6 +494,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
 
     // Wire Content delegate
     newSession.contentDelegate = object : GeckoSession.ContentDelegate {
+      override fun onCrash(session: GeckoSession) {
+        Log.e(TAG, "[FORENSIC] CONTENT_CRASH tabId=$tabId")
+      }
+
+      override fun onKill(session: GeckoSession) {
+        Log.e(TAG, "[FORENSIC] CONTENT_KILL tabId=$tabId")
+      }
+
       override fun onTitleChange(session: GeckoSession, title: String?) {
         title?.let {
           if (it.isNotBlank() && it != "about:blank") {

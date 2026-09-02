@@ -160,8 +160,21 @@ fun BrowserScreen(
   val scope = rememberCoroutineScope()
   val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
+  var composeCount by remember { mutableIntStateOf(0) }
+  SideEffect {
+    composeCount++
+    com.remmi.browser.util.DebugLogManager.log("[FORENSIC] BROWSER_SCREEN_COMPOSE count=$composeCount (time=${android.os.SystemClock.elapsedRealtime()})")
+  }
+
   LaunchedEffect(Unit) {
     com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.BROWSER_SCREEN_COMPOSE)
+    com.remmi.browser.util.DebugLogManager.log("[FORENSIC] BROWSER_SCREEN_COMPOSE LaunchedEffect entered")
+  }
+
+  DisposableEffect(Unit) {
+    onDispose {
+      com.remmi.browser.util.DebugLogManager.log("[FORENSIC] BROWSER_SCREEN_COMPOSE DisposableEffect left")
+    }
   }
 
   val tabManager = remember { TabManager.getInstance() }
