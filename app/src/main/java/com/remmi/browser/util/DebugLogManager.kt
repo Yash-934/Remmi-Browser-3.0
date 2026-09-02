@@ -1,6 +1,7 @@
 package com.remmi.browser.util
 
 import android.content.Context
+import android.os.Process
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Unified Thread-Safe Diagnostic Log Store & Persistent Breadcrumbs for Remmi Browser.
  * Non-blocking in-memory ring buffer with coalesced, debounced background I/O writer.
+ * Strictly binds every event to sessionId, processPid, timestamp, and thread.
  */
 object DebugLogManager {
   private const val TAG = "RemmiDebugLog"
@@ -32,6 +34,7 @@ object DebugLogManager {
   @Volatile
   private var appContext: Context? = null
   private val persistentBreadcrumbs = ConcurrentLinkedDeque<String>()
+  private val previousSessionBreadcrumbs = ConcurrentLinkedDeque<String>()
   private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
   private val isDirty = AtomicBoolean(false)
 
@@ -54,7 +57,10 @@ object DebugLogManager {
   fun log(message: String) {
     val timestamp = synchronized(timeFormat) { timeFormat.format(Date()) }
     val sanitized = sanitize(message)
-    val entry = "[$timestamp] $sanitized"
+    val thread = Thread.currentThread()
+    val sess = CrashHandlerHelper.currentSessionId
+    val pid = Process.myPid()
+    val entry = "[$timestamp][session=$sess][pid=$pid][thread=${thread.name}(${thread.id})] $sanitized"
 
     Log.d(TAG, sanitized)
 
@@ -113,21 +119,23 @@ object DebugLogManager {
   }
 
   /**
-   * Explicit synchronous flush strictly for fatal crash handler hand-off.
+   * Explicit synchronous flush strictly for fatal crash handler hand-off or test teardown.
    */
   fun flushSynchronously() {
-    synchronized(persistentBreadcrumbs) {
-      val ctx = appContext ?: return
-      try {
-        val file = File(ctx.filesDir, BREADCRUMBS_FILE)
-        val tempFile = File(ctx.filesDir, "$BREADCRUMBS_FILE.tmp")
-        val content = persistentBreadcrumbs.joinToString("\n")
-        tempFile.writeText(content)
-        if (tempFile.exists()) {
-          tempFile.renameTo(file)
-        }
-        isDirty.set(false)
-      } catch (_: Throwable) {}
+    HangWatchdog.recordUiThreadBlockingOpIfNeeded("diagnostic flush") {
+      synchronized(persistentBreadcrumbs) {
+        val ctx = appContext ?: return@recordUiThreadBlockingOpIfNeeded
+        try {
+          val file = File(ctx.filesDir, BREADCRUMBS_FILE)
+          val tempFile = File(ctx.filesDir, "$BREADCRUMBS_FILE.tmp")
+          val content = persistentBreadcrumbs.joinToString("\n")
+          tempFile.writeText(content)
+          if (tempFile.exists()) {
+            tempFile.renameTo(file)
+          }
+          isDirty.set(false)
+        } catch (_: Throwable) {}
+      }
     }
   }
 
@@ -152,20 +160,36 @@ object DebugLogManager {
       val file = File(ctx.filesDir, BREADCRUMBS_FILE)
       if (file.exists()) {
         val lines = file.readLines().takeLast(MAX_BREADCRUMBS)
-        persistentBreadcrumbs.clear()
-        persistentBreadcrumbs.addAll(lines)
+        previousSessionBreadcrumbs.clear()
+        previousSessionBreadcrumbs.addAll(lines)
       }
     } catch (_: Throwable) {}
   }
 
   fun getRecentEvents(limit: Int = MAX_BREADCRUMBS): List<String> {
-    return persistentBreadcrumbs.toList().takeLast(limit)
+    val list = persistentBreadcrumbs.toList()
+    return if (list.isNotEmpty()) {
+      list.takeLast(limit)
+    } else {
+      previousSessionBreadcrumbs.toList().takeLast(limit)
+    }
+  }
+
+  fun getLastCurrentSessionEvent(): String {
+    val current = persistentBreadcrumbs.peekLast()
+    return current ?: "NONE"
+  }
+
+  fun getLastPreviousSessionEvent(): String {
+    val prev = previousSessionBreadcrumbs.peekLast()
+    return prev ?: "NONE"
   }
 
   fun clear() {
     synchronized(this) {
       _logs.value = emptyList()
       persistentBreadcrumbs.clear()
+      previousSessionBreadcrumbs.clear()
       isDirty.set(false)
       backgroundWriter.execute {
         val ctx = appContext

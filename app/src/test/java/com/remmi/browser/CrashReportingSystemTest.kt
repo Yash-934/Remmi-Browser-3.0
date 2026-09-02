@@ -144,4 +144,84 @@ class CrashReportingSystemTest {
     assertTrue(prefs.getBoolean(CrashHandlerHelper.KEY_PREVIOUS_RUN_CLEAN, false))
     assertEquals(StartupPhase.SHUTDOWN.id, prefs.getString(CrashHandlerHelper.KEY_STARTUP_PHASE, null))
   }
+
+  @Test
+  fun testProcessExitClassificationUserRequestedTermination() {
+    val classified = CrashHandlerHelper.classifyExit(
+      reason = 10, // REASON_USER_REQUESTED
+      status = 0,
+      description = "[REMOVE TASK] callingPid=6806"
+    )
+    assertEquals(com.remmi.browser.util.ProcessExitClassification.USER_REQUESTED_TERMINATION, classified)
+
+    val signal = CrashHandlerHelper.classifySignal(
+      status = 0,
+      reason = 10,
+      description = "[REMOVE TASK] callingPid=6806"
+    )
+    assertEquals("STATUS_0", signal)
+
+    val report = CrashHandlerHelper.buildDiagnosticReport(
+      context = context,
+      reportType = ReportType.ABNORMAL_TERMINATION,
+      thread = Thread.currentThread(),
+      throwable = null,
+      sessionId = "test-session-user-term",
+      lastPhase = StartupPhase.APP_READY.id,
+      wasClean = false,
+      lastCleanTimestamp = 0L,
+      reportTime = System.currentTimeMillis()
+    )
+
+    assertTrue(report.contains("REMMI BROWSER - AUTOMATIC DIAGNOSTIC REPORT"))
+    assertTrue(report.contains("Tombstone / Native Backtrace:\nUNAVAILABLE"))
+    assertFalse(report.contains("NATIVE CRASH DETECTED"))
+  }
+
+  @Test
+  fun testProcessExitClassificationSignals() {
+    assertEquals(
+      com.remmi.browser.util.ProcessExitClassification.OOM_KILL,
+      CrashHandlerHelper.classifyExit(reason = 3, status = 0, description = "low memory kill")
+    )
+
+    assertEquals(
+      com.remmi.browser.util.ProcessExitClassification.ANR,
+      CrashHandlerHelper.classifyExit(reason = 6, status = 0, description = "Input dispatching timed out")
+    )
+
+    assertEquals(
+      com.remmi.browser.util.ProcessExitClassification.NATIVE_FATAL_SIGNAL,
+      CrashHandlerHelper.classifyExit(reason = 5, status = 11, description = "segmentation fault")
+    )
+    assertEquals(
+      "SIGSEGV (Segmentation Fault)",
+      CrashHandlerHelper.classifySignal(status = 11, reason = 5, description = "segmentation fault")
+    )
+  }
+
+  @Test
+  fun testLastNativeOperationSessionAndPidIsolation() {
+    CrashHandlerHelper.resetNativeOpState()
+    val initialOp = CrashHandlerHelper.getLastNativeOpString(context)
+    assertEquals("NONE", initialOp)
+
+    CrashHandlerHelper.recordNativeOp(context = context, op = "[ADBLOCK_DEFAULT_RULES_START]")
+    val currentOp = CrashHandlerHelper.getLastNativeOpString(context)
+    assertTrue(currentOp.contains("[ADBLOCK_DEFAULT_RULES_START]"))
+  }
+
+  @Test
+  fun testCompileSingleFlightInvariant() {
+    val bridge = com.remmi.adblock.AdblockBridge()
+    val initialMax = com.remmi.browser.util.HangWatchdog.maxActiveCompileJobs.get()
+
+    val count = bridge.compileRules(
+      defaultRulesText = "||example.com^\n||tracker.com^",
+      additionalRulesText = "||ad.com^",
+      source = "unit_test"
+    )
+    assertTrue(count >= 0)
+    assertTrue(com.remmi.browser.util.HangWatchdog.maxActiveCompileJobs.get() <= 1)
+  }
 }

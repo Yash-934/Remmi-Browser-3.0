@@ -1,10 +1,12 @@
 package com.remmi.browser.util
 
+import android.app.ActivityManager
 import android.app.Application
 import android.content.ContentValues
 import android.content.Context
 import android.os.Build
 import android.os.Environment
+import android.os.Process
 import android.provider.MediaStore
 import android.util.Log
 import com.remmi.adblock.AdblockBridge
@@ -24,11 +26,12 @@ enum class ReportType {
 
 enum class ProcessExitClassification {
   USER_REQUESTED_TERMINATION,
-  NATIVE_FATAL_SIGNAL,
-  SYSTEM_KILL,
-  OOM,
+  SYSTEM_PROCESS_KILL,
+  OOM_KILL,
   ANR,
-  UNKNOWN
+  NATIVE_FATAL_SIGNAL,
+  JAVA_UNCAUGHT_EXCEPTION,
+  UNKNOWN_PROCESS_EXIT
 }
 
 enum class StartupPhase(val id: String) {
@@ -68,8 +71,13 @@ object CrashHandlerHelper {
   const val KEY_PREVIOUS_RUN_CLEAN = "previous_run_clean"
   const val KEY_STARTUP_TIMESTAMP = "startup_timestamp"
   const val KEY_STARTUP_SESSION_ID = "startup_session_id"
+  const val KEY_STARTUP_PROCESS_PID = "startup_process_pid"
   const val KEY_STARTUP_PHASE = "startup_phase"
   const val KEY_LAST_CLEAN_TIMESTAMP = "last_clean_timestamp"
+
+  const val KEY_PREVIOUS_SESSION_ID = "previous_session_id"
+  const val KEY_PREVIOUS_PROCESS_PID = "previous_process_pid"
+  const val KEY_PREVIOUS_LAST_NATIVE_OP = "previous_last_native_op"
 
   const val KEY_PENDING_REPORT = "pending_report_content"
   const val KEY_PENDING_TIMESTAMP = "pending_report_timestamp"
@@ -87,11 +95,35 @@ object CrashHandlerHelper {
     private set
 
   @Volatile
-  var currentPhase: StartupPhase = StartupPhase.PROCESS_START
+  var currentProcessPid: Int = 0
     private set
 
   @Volatile
-  var lastNativeOperation: String = "NONE"
+  var currentProcessStartTimestamp: Long = 0L
+    private set
+
+  @Volatile
+  var previousSessionId: String = "NONE"
+    private set
+
+  @Volatile
+  var previousProcessPid: Int = -1
+    private set
+
+  @Volatile
+  var currentSessionLastNativeOp: String = "NONE"
+    private set
+
+  @Volatile
+  var previousSessionLastNativeOp: String = "NONE"
+    private set
+
+  // Backwards compatibility getter for callers referencing lastNativeOperation
+  val lastNativeOperation: String
+    get() = if (currentSessionLastNativeOp != "NONE") currentSessionLastNativeOp else previousSessionLastNativeOp
+
+  @Volatile
+  var currentPhase: StartupPhase = StartupPhase.PROCESS_START
     private set
 
   @Volatile
@@ -99,21 +131,30 @@ object CrashHandlerHelper {
 
   /**
    * Called as the earliest step during process initialization (RemmiApp.onCreate).
-   * Checks for abnormal termination of previous run and sets up new session heartbeat.
+   * Checks for abnormal termination of previous run, records session identity, and resets current session journal.
    */
   fun onProcessStart(context: Context) {
     try {
       appContext = context.applicationContext
+      currentProcessPid = Process.myPid()
+      currentProcessStartTimestamp = System.currentTimeMillis()
+
       val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
       val wasClean = prefs.getBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
       val prevSessionId = prefs.getString(KEY_STARTUP_SESSION_ID, null)
+      val prevPid = prefs.getInt(KEY_STARTUP_PROCESS_PID, -1)
       val prevPhase = prefs.getString(KEY_STARTUP_PHASE, "UNKNOWN") ?: "UNKNOWN"
       val prevTimestamp = prefs.getLong(KEY_STARTUP_TIMESTAMP, 0L)
       val lastCleanTimestamp = prefs.getLong(KEY_LAST_CLEAN_TIMESTAMP, 0L)
+      val prevNativeOp = prefs.getString(KEY_LAST_NATIVE_OP, "NONE") ?: "NONE"
       val hasPendingJavaCrash = prefs.contains(KEY_PENDING_REPORT)
 
+      previousSessionId = prevSessionId ?: "NONE"
+      previousProcessPid = prevPid
+      previousSessionLastNativeOp = prevNativeOp
+
       // If previous run was NOT clean AND there was a session recorded AND no Java crash report was written,
-      // this indicates an abnormal process termination (native crash / OOM / force kill / external termination).
+      // this indicates an abnormal process termination (native crash / OOM / force kill / task removal).
       if (!wasClean && prevSessionId != null && !hasPendingJavaCrash) {
         val abnormalReport = buildDiagnosticReport(
           context = context,
@@ -128,20 +169,24 @@ object CrashHandlerHelper {
         )
 
         val reportTimestamp = System.currentTimeMillis()
-        prefs.edit()
-          .putString(KEY_PENDING_REPORT, abnormalReport)
-          .putLong(KEY_PENDING_TIMESTAMP, reportTimestamp)
-          .putString(KEY_PENDING_TYPE, ReportType.ABNORMAL_TERMINATION.name)
-          .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, false)
-          .commit()
+        HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
+          prefs.edit()
+            .putString(KEY_PENDING_REPORT, abnormalReport)
+            .putLong(KEY_PENDING_TIMESTAMP, reportTimestamp)
+            .putString(KEY_PENDING_TYPE, ReportType.ABNORMAL_TERMINATION.name)
+            .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, false)
+            .commit()
+        }
 
-        // Attempt immediate persistence of the abnormal termination report
+        // Immediate persistence of abnormal termination report
         val exportPath = saveToDownloads(context, abnormalReport, reportTimestamp, ReportType.ABNORMAL_TERMINATION)
         if (exportPath != null) {
-          prefs.edit()
-            .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, true)
-            .putString(KEY_PENDING_SAVED_PATH, exportPath)
-            .commit()
+          HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
+            prefs.edit()
+              .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, true)
+              .putString(KEY_PENDING_SAVED_PATH, exportPath)
+              .commit()
+          }
         }
       }
 
@@ -149,15 +194,23 @@ object CrashHandlerHelper {
       val newSessionId = UUID.randomUUID().toString()
       currentSessionId = newSessionId
       currentPhase = StartupPhase.PROCESS_START
+      currentSessionLastNativeOp = "NONE"
 
-      prefs.edit()
-        .putBoolean(KEY_PREVIOUS_RUN_CLEAN, false)
-        .putLong(KEY_STARTUP_TIMESTAMP, System.currentTimeMillis())
-        .putString(KEY_STARTUP_SESSION_ID, newSessionId)
-        .putString(KEY_STARTUP_PHASE, StartupPhase.PROCESS_START.id)
-        .commit()
+      HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
+        prefs.edit()
+          .putBoolean(KEY_PREVIOUS_RUN_CLEAN, false)
+          .putLong(KEY_STARTUP_TIMESTAMP, currentProcessStartTimestamp)
+          .putString(KEY_STARTUP_SESSION_ID, newSessionId)
+          .putInt(KEY_STARTUP_PROCESS_PID, currentProcessPid)
+          .putString(KEY_STARTUP_PHASE, StartupPhase.PROCESS_START.id)
+          .putString(KEY_LAST_NATIVE_OP, "NONE")
+          .putString(KEY_PREVIOUS_SESSION_ID, previousSessionId)
+          .putInt(KEY_PREVIOUS_PROCESS_PID, previousProcessPid)
+          .putString(KEY_PREVIOUS_LAST_NATIVE_OP, previousSessionLastNativeOp)
+          .commit()
+      }
 
-      DebugLogManager.log("[APP_LIFECYCLE] PROCESS_START (session=$newSessionId)")
+      DebugLogManager.log("[APP_LIFECYCLE] PROCESS_START (session=$newSessionId, pid=$currentProcessPid)")
     } catch (e: Throwable) {
       Log.e(TAG, "Error in onProcessStart: ${e.message}", e)
     }
@@ -189,8 +242,8 @@ object CrashHandlerHelper {
   }
 
   /**
-   * Records a native operation marker into persistent preferences and the debug journal.
-   * In-memory immediately, persisted asynchronously.
+   * Records a native operation marker into persistent preferences and the debug journal,
+   * strictly bound to the current session and PID.
    */
   fun recordNativeOp(
     context: Context? = null,
@@ -200,7 +253,7 @@ object CrashHandlerHelper {
     abi: String? = null
   ) {
     try {
-      lastNativeOperation = op
+      currentSessionLastNativeOp = op
       val ctx = context?.applicationContext ?: appContext
       if (ctx != null) {
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -224,11 +277,13 @@ object CrashHandlerHelper {
     try {
       currentPhase = StartupPhase.SHUTDOWN
       val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-      prefs.edit()
-        .putBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
-        .putString(KEY_STARTUP_PHASE, StartupPhase.SHUTDOWN.id)
-        .putLong(KEY_LAST_CLEAN_TIMESTAMP, System.currentTimeMillis())
-        .commit()
+      HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
+        prefs.edit()
+          .putBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
+          .putString(KEY_STARTUP_PHASE, StartupPhase.SHUTDOWN.id)
+          .putLong(KEY_LAST_CLEAN_TIMESTAMP, System.currentTimeMillis())
+          .commit()
+      }
 
       DebugLogManager.log("[APP_LIFECYCLE] SHUTDOWN")
     } catch (e: Throwable) {
@@ -264,13 +319,15 @@ object CrashHandlerHelper {
         DebugLogManager.flushSynchronously()
 
         // 1. Save pending report to SharedPreferences synchronously
-        prefs.edit()
-          .putString(KEY_PENDING_REPORT, report)
-          .putLong(KEY_PENDING_TIMESTAMP, now)
-          .putString(KEY_PENDING_TYPE, ReportType.JAVA_CRASH.name)
-          .putBoolean(KEY_PREVIOUS_RUN_CLEAN, false)
-          .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, false)
-          .commit()
+        HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
+          prefs.edit()
+            .putString(KEY_PENDING_REPORT, report)
+            .putLong(KEY_PENDING_TIMESTAMP, now)
+            .putString(KEY_PENDING_TYPE, ReportType.JAVA_CRASH.name)
+            .putBoolean(KEY_PREVIOUS_RUN_CLEAN, false)
+            .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, false)
+            .commit()
+        }
 
         // 2. Save to app-private internal storage
         try {
@@ -281,10 +338,12 @@ object CrashHandlerHelper {
         // 3. Attempt immediate synchronous export to Downloads/Remmi Crash Reports/
         val exportPath = saveToDownloads(app, report, now, ReportType.JAVA_CRASH)
         if (exportPath != null) {
-          prefs.edit()
-            .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, true)
-            .putString(KEY_PENDING_SAVED_PATH, exportPath)
-            .commit()
+          HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous SharedPreferences.commit") {
+            prefs.edit()
+              .putBoolean(KEY_PENDING_EXPORT_CONFIRMED, true)
+              .putString(KEY_PENDING_SAVED_PATH, exportPath)
+              .commit()
+          }
         }
       } catch (e: Throwable) {
         Log.e(TAG, "Failed to capture crash report: ${e.message}", e)
@@ -332,7 +391,7 @@ object CrashHandlerHelper {
         }
       }
 
-      // Only clear the pending report marker once export/persistence is confirmed
+      // Only clear pending report marker once export/persistence is confirmed
       val isConfirmed = (savedPath != null || alreadyConfirmed)
       if (isConfirmed) {
         prefs.edit()
@@ -366,104 +425,106 @@ object CrashHandlerHelper {
     timestamp: Long,
     reportType: ReportType = ReportType.JAVA_CRASH
   ): String? {
-    val dateStr = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(timestamp))
-    val fileName = if (reportType == ReportType.ABNORMAL_TERMINATION) {
-      "abnormal_termination_$dateStr.txt"
-    } else {
-      "crash_$dateStr.txt"
-    }
-    val latestFileName = if (reportType == ReportType.ABNORMAL_TERMINATION) {
-      "abnormal_latest.txt"
-    } else {
-      "crash_latest.txt"
-    }
+    return HangWatchdog.recordUiThreadBlockingOpIfNeeded("synchronous file write") {
+      val dateStr = SimpleDateFormat("yyyy-MM-dd_HHmmss_SSS", Locale.US).format(Date(timestamp))
+      val fileName = if (reportType == ReportType.ABNORMAL_TERMINATION) {
+        "abnormal_termination_$dateStr.txt"
+      } else {
+        "crash_$dateStr.txt"
+      }
+      val latestFileName = if (reportType == ReportType.ABNORMAL_TERMINATION) {
+        "abnormal_latest.txt"
+      } else {
+        "crash_latest.txt"
+      }
 
-    var resultPath: String? = null
+      var resultPath: String? = null
 
-    try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        val resolver = context.contentResolver
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          val resolver = context.contentResolver
 
-        // 1. Write timestamped file with IS_PENDING safety
-        val contentValues = ContentValues().apply {
-          put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-          put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-          put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Remmi Crash Reports")
-          put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
-        if (uri != null) {
-          try {
-            resolver.openOutputStream(uri)?.use { os ->
-              os.write(report.toByteArray(Charsets.UTF_8))
-              os.flush()
-            }
-            contentValues.clear()
-            contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            resolver.update(uri, contentValues, null, null)
-            resultPath = "Downloads/Remmi Crash Reports/$fileName"
-          } catch (writeEx: Throwable) {
-            try { resolver.delete(uri, null, null) } catch (_: Throwable) {}
-            throw writeEx
-          }
-        }
-
-        // 2. Also write/update latest file
-        try {
-          val latestValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, latestFileName)
+          // 1. Write timestamped file with IS_PENDING safety
+          val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
             put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Remmi Crash Reports")
             put(MediaStore.MediaColumns.IS_PENDING, 1)
           }
-          val latestUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, latestValues)
-          if (latestUri != null) {
-            resolver.openOutputStream(latestUri)?.use { os ->
-              os.write(report.toByteArray(Charsets.UTF_8))
-              os.flush()
+          val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+          if (uri != null) {
+            try {
+              resolver.openOutputStream(uri)?.use { os ->
+                os.write(report.toByteArray(Charsets.UTF_8))
+                os.flush()
+              }
+              contentValues.clear()
+              contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+              resolver.update(uri, contentValues, null, null)
+              resultPath = "Downloads/Remmi Crash Reports/$fileName"
+            } catch (writeEx: Throwable) {
+              try { resolver.delete(uri, null, null) } catch (_: Throwable) {}
+              throw writeEx
             }
-            latestValues.clear()
-            latestValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            resolver.update(latestUri, latestValues, null, null)
           }
-        } catch (_: Throwable) {}
 
-      } else {
-        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val crashDir = File(downloadsDir, "Remmi Crash Reports")
-        if (!crashDir.exists()) {
-          crashDir.mkdirs()
+          // 2. Also write/update latest file
+          try {
+            val latestValues = ContentValues().apply {
+              put(MediaStore.MediaColumns.DISPLAY_NAME, latestFileName)
+              put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+              put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Remmi Crash Reports")
+              put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val latestUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, latestValues)
+            if (latestUri != null) {
+              resolver.openOutputStream(latestUri)?.use { os ->
+                os.write(report.toByteArray(Charsets.UTF_8))
+                os.flush()
+              }
+              latestValues.clear()
+              latestValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+              resolver.update(latestUri, latestValues, null, null)
+            }
+          } catch (_: Throwable) {}
+
+        } else {
+          val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+          val crashDir = File(downloadsDir, "Remmi Crash Reports")
+          if (!crashDir.exists()) {
+            crashDir.mkdirs()
+          }
+          val targetFile = File(crashDir, fileName)
+          targetFile.writeText(report)
+
+          val latestFile = File(crashDir, latestFileName)
+          latestFile.writeText(report)
+
+          resultPath = targetFile.absolutePath
         }
-        val targetFile = File(crashDir, fileName)
-        targetFile.writeText(report)
-
-        val latestFile = File(crashDir, latestFileName)
-        latestFile.writeText(report)
-
-        resultPath = targetFile.absolutePath
-      }
-    } catch (e: Throwable) {
-      Log.e(TAG, "Error saving report to public Downloads: ${e.message}", e)
-      // Fallback to app-private external / internal storage
-      try {
-        val extDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-        val fallbackDir = File(extDir, "Remmi Crash Reports").apply { mkdirs() }
-        val fallbackFile = File(fallbackDir, fileName)
-        fallbackFile.writeText(report)
-        File(fallbackDir, latestFileName).writeText(report)
-        resultPath = fallbackFile.absolutePath
-      } catch (_: Throwable) {
+      } catch (e: Throwable) {
+        Log.e(TAG, "Error saving report to public Downloads: ${e.message}", e)
+        // Fallback to app-private external / internal storage
         try {
-          val internalDir = File(context.filesDir, "Remmi Crash Reports").apply { mkdirs() }
-          val internalFile = File(internalDir, fileName)
-          internalFile.writeText(report)
-          File(internalDir, latestFileName).writeText(report)
-          resultPath = internalFile.absolutePath
-        } catch (_: Throwable) {}
+          val extDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+          val fallbackDir = File(extDir, "Remmi Crash Reports").apply { mkdirs() }
+          val fallbackFile = File(fallbackDir, fileName)
+          fallbackFile.writeText(report)
+          File(fallbackDir, latestFileName).writeText(report)
+          resultPath = fallbackFile.absolutePath
+        } catch (_: Throwable) {
+          try {
+            val internalDir = File(context.filesDir, "Remmi Crash Reports").apply { mkdirs() }
+            val internalFile = File(internalDir, fileName)
+            internalFile.writeText(report)
+            File(internalDir, latestFileName).writeText(report)
+            resultPath = internalFile.absolutePath
+          } catch (_: Throwable) {}
+        }
       }
-    }
 
-    return resultPath
+      resultPath
+    }
   }
 
   data class NativeExitInfo(
@@ -472,70 +533,108 @@ object CrashHandlerHelper {
     val signalCode: Int,
     val description: String,
     val traceBacktrace: String?,
+    val historicalPid: Int,
+    val callingPid: String,
     val isOom: Boolean,
     val isAnr: Boolean
   )
 
+  fun resetNativeOpState() {
+    currentSessionLastNativeOp = "NONE"
+    previousSessionLastNativeOp = "NONE"
+  }
+
+  fun getLastNativeOpString(context: Context? = null): String {
+    return lastNativeOperation
+  }
+
+  fun classifyExit(reason: Int, status: Int, description: String = ""): ProcessExitClassification {
+    val descLower = description.lowercase()
+    val isUserRequested = (
+      reason == 10 || // REASON_USER_REQUESTED
+      reason == 11 || // REASON_USER_STOPPED
+      reason == 1 ||  // REASON_EXIT_SELF
+      descLower.contains("remove task") ||
+      descLower.contains("user_requested") ||
+      descLower.contains("user requested")
+    )
+
+    val isOom = (
+      reason == 3 || // REASON_LOW_MEMORY
+      descLower.contains("lowmemorykiller") ||
+      descLower.contains("lmkd") ||
+      descLower.contains("oom") ||
+      descLower.contains("out of memory") ||
+      descLower.contains("memory pressure")
+    )
+
+    val isAnr = (
+      reason == 6 || // REASON_ANR
+      descLower.contains("anr")
+    )
+
+    val isNativeFatal = (
+      reason == 5 || // REASON_CRASH_NATIVE
+      (reason == 2 && status in listOf(4, 6, 7, 8, 11)) // REASON_SIGNALED
+    )
+
+    return when {
+      isUserRequested -> ProcessExitClassification.USER_REQUESTED_TERMINATION
+      isOom -> ProcessExitClassification.OOM_KILL
+      isAnr -> ProcessExitClassification.ANR
+      isNativeFatal -> ProcessExitClassification.NATIVE_FATAL_SIGNAL
+      status in listOf(9, 15) -> ProcessExitClassification.SYSTEM_PROCESS_KILL
+      reason == 4 -> ProcessExitClassification.JAVA_UNCAUGHT_EXCEPTION // REASON_CRASH
+      else -> ProcessExitClassification.UNKNOWN_PROCESS_EXIT
+    }
+  }
+
+  fun classifySignal(status: Int, reason: Int = 0, description: String = ""): String {
+    val descLower = description.lowercase()
+    val isUserRequested = (
+      reason == 10 || reason == 11 || reason == 1 ||
+      descLower.contains("remove task") || descLower.contains("user_requested") || descLower.contains("user requested")
+    )
+    val isOom = (
+      reason == 3 || descLower.contains("lowmemorykiller") || descLower.contains("lmkd") || descLower.contains("oom")
+    )
+    val isAnr = (
+      reason == 6 || descLower.contains("anr")
+    )
+
+    return when (status) {
+      11 -> "SIGSEGV (Segmentation Fault)"
+      6 -> "SIGABRT (Abort)"
+      7 -> "SIGBUS (Bus Error)"
+      4 -> "SIGILL (Illegal Instruction)"
+      8 -> "SIGFPE (Floating Point Exception)"
+      9 -> "SIGKILL (Killed by OS)"
+      15 -> "SIGTERM (Termination Request)"
+      0 -> if (isUserRequested) "STATUS_0" else "STATUS_0"
+      else -> when {
+        isOom -> "OOM (Low Memory Killer)"
+        isAnr -> "ANR (Application Not Responding)"
+        else -> "STATUS_$status"
+      }
+    }
+  }
+
   fun queryHistoricalProcessExit(context: Context): NativeExitInfo? {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
       try {
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return null
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
         val exitList = am.getHistoricalProcessExitReasons(context.packageName, 0, 1)
         val latest = exitList.firstOrNull() ?: return null
 
-        val reasonStr = when (latest.reason) {
-          android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
-          android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH_JAVA"
-          android.app.ApplicationExitInfo.REASON_ANR -> "ANR"
-          android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "OOM_LOW_MEMORY"
-          android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
-          android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
-          android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
-          android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
-          android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCE_USAGE"
-          android.app.ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
-          else -> "REASON_${latest.reason}"
-        }
+        val desc = latest.description ?: ""
+        val classification = classifyExit(latest.reason, latest.status, desc)
+        val signalName = classifySignal(latest.status, latest.reason, desc)
 
-        val signalName = when (latest.status) {
-          11 -> "SIGSEGV (Segmentation Fault)"
-          6 -> "SIGABRT (Abort)"
-          7 -> "SIGBUS (Bus Error)"
-          4 -> "SIGILL (Illegal Instruction)"
-          8 -> "SIGFPE (Floating Point Exception)"
-          9 -> "SIGKILL (Killed by OS)"
-          15 -> "SIGTERM (Termination Request)"
-          else -> if (latest.reason == android.app.ApplicationExitInfo.REASON_LOW_MEMORY) "OOM (Low Memory Killer)" else if (latest.reason == android.app.ApplicationExitInfo.REASON_ANR) "ANR (Application Not Responding)" else "STATUS_${latest.status}"
-        }
+        val isOom = classification == ProcessExitClassification.OOM_KILL
+        val isAnr = classification == ProcessExitClassification.ANR
 
-        val classification = when (latest.reason) {
-          android.app.ApplicationExitInfo.REASON_USER_REQUESTED,
-          android.app.ApplicationExitInfo.REASON_USER_STOPPED,
-          android.app.ApplicationExitInfo.REASON_EXIT_SELF -> ProcessExitClassification.USER_REQUESTED_TERMINATION
-
-          android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> {
-            if (latest.status in listOf(4, 6, 7, 8, 11) || latest.status > 0) {
-              ProcessExitClassification.NATIVE_FATAL_SIGNAL
-            } else {
-              ProcessExitClassification.UNKNOWN
-            }
-          }
-
-          android.app.ApplicationExitInfo.REASON_SIGNALED -> {
-            when (latest.status) {
-              4, 6, 7, 8, 11 -> ProcessExitClassification.NATIVE_FATAL_SIGNAL
-              9, 15 -> ProcessExitClassification.SYSTEM_KILL
-              else -> ProcessExitClassification.UNKNOWN
-            }
-          }
-
-          android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> ProcessExitClassification.OOM
-          android.app.ApplicationExitInfo.REASON_ANR -> ProcessExitClassification.ANR
-          android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE,
-          android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED,
-          android.app.ApplicationExitInfo.REASON_OTHER -> ProcessExitClassification.SYSTEM_KILL
-          else -> ProcessExitClassification.UNKNOWN
-        }
+        val callingPidMatch = Regex("""callingPid=(\d+)""").find(desc)
+        val extractedCallingPid = callingPidMatch?.groupValues?.get(1) ?: "PID ROLE = UNKNOWN"
 
         var traceText: String? = null
         try {
@@ -544,14 +643,18 @@ object CrashHandlerHelper {
           }
         } catch (_: Throwable) {}
 
+        val formattedDesc = if (desc.isNotBlank()) desc else "Reason: ${latest.reason}, Status: ${latest.status}"
+
         return NativeExitInfo(
           classification = classification,
           signalName = signalName,
           signalCode = latest.status,
-          description = "${latest.description ?: reasonStr} (PID: ${latest.pid}, importance: ${latest.importance})",
+          description = formattedDesc,
           traceBacktrace = traceText?.takeIf { it.isNotBlank() },
-          isOom = latest.reason == android.app.ApplicationExitInfo.REASON_LOW_MEMORY,
-          isAnr = latest.reason == android.app.ApplicationExitInfo.REASON_ANR
+          historicalPid = latest.pid,
+          callingPid = extractedCallingPid,
+          isOom = isOom,
+          isAnr = isAnr
         )
       } catch (t: Throwable) {
         Log.w(TAG, "Could not query ApplicationExitInfo: ${t.message}")
@@ -592,8 +695,9 @@ object CrashHandlerHelper {
     }
 
     val prefs = try { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) } catch (_: Throwable) { null }
-    val savedLastNativeOp = prefs?.getString(KEY_LAST_NATIVE_OP, null)
-    val displayLastNativeOp = if (lastNativeOperation != "NONE") lastNativeOperation else (savedLastNativeOp ?: "NONE")
+    val savedPrevSessionId = prefs?.getString(KEY_PREVIOUS_SESSION_ID, null) ?: previousSessionId
+    val savedPrevProcessPid = prefs?.getInt(KEY_PREVIOUS_PROCESS_PID, -1) ?: previousProcessPid
+    val savedPrevNativeOp = prefs?.getString(KEY_PREVIOUS_LAST_NATIVE_OP, null) ?: previousSessionLastNativeOp
 
     val adblock = try { AdblockBridge.getInstance() } catch (_: Throwable) { null }
     val adblockVersion = adblock?.nativeApiVersion?.takeIf { it != "unknown" }
@@ -642,6 +746,9 @@ object CrashHandlerHelper {
       "No diagnostic events recorded"
     }
 
+    val currentSessionLastEvent = DebugLogManager.getLastCurrentSessionEvent()
+    val previousSessionLastEvent = DebugLogManager.getLastPreviousSessionEvent()
+
     val stackTrace = if (throwable != null) {
       Log.getStackTraceString(throwable)
     } else {
@@ -649,10 +756,30 @@ object CrashHandlerHelper {
     }
 
     val nativeExitInfo = if (throwable == null) queryHistoricalProcessExit(context) else null
-    val classification = nativeExitInfo?.classification ?: ProcessExitClassification.UNKNOWN
-    val detectedSignal = nativeExitInfo?.signalName ?: "UNKNOWN"
+    val classification = when {
+      throwable != null -> ProcessExitClassification.JAVA_UNCAUGHT_EXCEPTION
+      nativeExitInfo != null -> nativeExitInfo.classification
+      else -> ProcessExitClassification.UNKNOWN_PROCESS_EXIT
+    }
+
+    val detectedSignal = when {
+      throwable != null -> "N/A (Java Exception)"
+      nativeExitInfo != null -> nativeExitInfo.signalName
+      else -> "UNKNOWN"
+    }
+
     val exitDetails = nativeExitInfo?.description ?: "No historical exit info recorded"
-    val backtraceText = nativeExitInfo?.traceBacktrace ?: "Tombstone / Native Backtrace: UNAVAILABLE (No trace stream provided by OS)"
+    val historicalPidStr = if (nativeExitInfo != null && nativeExitInfo.historicalPid > 0) nativeExitInfo.historicalPid.toString() else "UNKNOWN"
+    val callingPidStr = nativeExitInfo?.callingPid ?: "PID ROLE = UNKNOWN"
+    val backtraceText = if (nativeExitInfo?.traceBacktrace != null) {
+      "Tombstone / Native Backtrace:\n${nativeExitInfo.traceBacktrace}"
+    } else {
+      "Tombstone / Native Backtrace:\nUNAVAILABLE"
+    }
+
+    val currentPid = Process.myPid()
+    val currentNativeOpDisplay = currentSessionLastNativeOp
+    val previousNativeOpDisplay = savedPrevNativeOp
 
     return """
 ======================================================================
@@ -662,13 +789,25 @@ REMMI BROWSER - AUTOMATIC DIAGNOSTIC REPORT
 Report Type:
 ${reportType.name}
 
-Exit Classification:
-${if (throwable != null) "JAVA_CRASH" else classification.name}
+PROCESS TERMINATION:
+Classification: ${classification.name}
+Signal: $detectedSignal
+Exit Reason: ${if (throwable != null) "Java Uncaught Exception: ${throwable.javaClass.name}" else exitDetails}
+Current Process PID: $currentPid
+Historical Terminated PID: $historicalPidStr
+Calling PID: $callingPidStr
 
-Timestamp: $now
-APK version: $versionName ($versionCode)
-Package: ${context.packageName}
-Startup Session ID: $sessionId
+CURRENT SESSION:
+Session ID: $currentSessionId
+Process PID: $currentPid
+Last Diagnostic Event: $currentSessionLastEvent
+Last Native Operation: $currentNativeOpDisplay
+
+PREVIOUS SESSION:
+Session ID: $savedPrevSessionId
+Process PID: ${if (savedPrevProcessPid > 0) savedPrevProcessPid.toString() else "NONE"}
+Last Diagnostic Event: $previousSessionLastEvent
+Last Native Operation: $previousNativeOpDisplay
 
 DEVICE:
 Brand: ${Build.BRAND}
@@ -680,8 +819,8 @@ SDK: ${Build.VERSION.SDK_INT}
 Supported ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")}
 
 PROCESS:
-Process ID: ${android.os.Process.myPid()}
-Exit Classification: ${if (throwable != null) "JAVA_CRASH" else classification.name}
+Process ID: $currentPid
+Exit Classification: ${classification.name}
 Thread if available: ${thread?.let { "${it.name} (ID: ${it.id})" } ?: "N/A (Process-level termination)"}
 
 STARTUP STATE:
@@ -698,7 +837,9 @@ Adblock native version: $adblockVersion
 Adblock native build ID: $adblockBuildId
 Adblock API version: $adblockApiVersionNumeric
 Native compatibility state: $nativeCompatState
-Last native operation: $displayLastNativeOp
+Current session last native operation: $currentNativeOpDisplay
+Previous session last native operation: $previousNativeOpDisplay
+Last native operation: ${if (currentNativeOpDisplay != "NONE") currentNativeOpDisplay else if (previousNativeOpDisplay != "NONE") "PREVIOUS_SESSION: $previousNativeOpDisplay" else "NONE"}
 SQLCipher load state: $sqlcipherLoadState
 
 SUBSYSTEM STATE:
@@ -727,7 +868,9 @@ ${if (throwable == null) """
 Classification: ${classification.name}
 Signal: $detectedSignal
 Exit Details: $exitDetails
-Last native operation: $displayLastNativeOp
+Current session last native operation: $currentNativeOpDisplay
+Previous session last native operation: $previousNativeOpDisplay
+Last native operation: ${if (currentNativeOpDisplay != "NONE") currentNativeOpDisplay else if (previousNativeOpDisplay != "NONE") "PREVIOUS_SESSION: $previousNativeOpDisplay" else "NONE"}
 NO JAVA EXCEPTION CAPTURED.
 $backtraceText
 """.trimIndent() else "N/A (Captured by Java UncaughtExceptionHandler)"}

@@ -176,6 +176,7 @@ class AdblockBridge {
   private var activeFallbackEngine: FallbackEngineSet = FallbackEngineSet()
   private val compileLock = Any()
   private val compileJobSequence = AtomicLong(0L)
+  private val activeCompileJobs = AtomicInteger(0)
 
   val totalBlockedCount = AtomicInteger(0)
   private val localEngineGeneration = AtomicLong(1L)
@@ -600,207 +601,218 @@ class AdblockBridge {
   ): Int {
     val jobId = "compile_${compileJobSequence.incrementAndGet()}"
     val currentGen = getEngineGeneration()
-    Log.i(TAG, "[COMPILE_REQUEST] source=$source generation=$currentGen jobId=$jobId")
+    val sess = com.remmi.browser.util.CrashHandlerHelper.currentSessionId
+    val pid = android.os.Process.myPid()
+    val callerThread = Thread.currentThread()
+
+    Log.i(TAG, "[COMPILE_REQUEST] source=$source generation=$currentGen jobId=$jobId sessionId=$sess processPid=$pid")
 
     if (android.os.Looper.myLooper() != null && android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
       Log.w(TAG, "[COMPILE_UI_THREAD] compileRules called on Main Looper Thread!")
     }
 
-    synchronized(compileLock) {
-      val thread = Thread.currentThread()
-      val defaultBytes = defaultRulesText.toByteArray().size
-      val additionalBytes = additionalRulesText.toByteArray().size
-      val totalInputBytes = defaultBytes + additionalBytes
+    if (activeCompileJobs.get() > 0) {
+      val waitMsg = "[COMPILE_WAIT_EXISTING] jobId=$jobId callerThread=${callerThread.name} activeCompileJobs=${activeCompileJobs.get()} sessionId=$sess processPid=$pid"
+      Log.i(TAG, waitMsg)
+      com.remmi.browser.util.DebugLogManager.log(waitMsg)
+    }
 
-      Log.i(TAG, "[COMPILE_ENTER] thread=${thread.name} (id=${thread.id}) inputBytes=$totalInputBytes")
-      Log.d(TAG, "[COMPILE_MEM_START] ${getMemoryStats()}")
+    return com.remmi.browser.util.HangWatchdog.recordUiThreadBlockingOpIfNeeded("native rule compilation") {
+      synchronized(compileLock) {
+        val activeJobs = activeCompileJobs.incrementAndGet()
+        if (activeJobs > com.remmi.browser.util.HangWatchdog.maxActiveCompileJobs.get()) {
+          com.remmi.browser.util.HangWatchdog.maxActiveCompileJobs.set(activeJobs)
+        }
 
-      val defaultLines = defaultRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
-      val additionalLines = additionalRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
-      val inputLines = defaultLines.size + additionalLines.size
+        val compileStartRealtime = android.os.SystemClock.elapsedRealtime()
+        val defaultBytes = defaultRulesText.toByteArray().size
+        val additionalBytes = additionalRulesText.toByteArray().size
+        val totalInputBytes = defaultBytes + additionalBytes
 
-      // Reject only empty or obviously corrupted input
-      if (defaultLines.isEmpty() && additionalLines.isEmpty()) {
-        Log.d(TAG, "[ADBLOCK_COMPILE] empty or comment-only rulesText, preserving active engine")
-        return 0
-      }
+        val defaultLines = defaultRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
+        val additionalLines = additionalRulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
+        val inputLines = defaultLines.size + additionalLines.size
 
-      val builtinRulesText = DEFAULT_DOMAINS.joinToString("\n") { "||$it^" } + "\n" +
-        DEFAULT_PATTERNS.joinToString("\n")
+        val compileEnterMsg = "[COMPILE_ENTER] thread=${callerThread.name} (id=${callerThread.id}) inputBytes=$totalInputBytes defaultBytes=$defaultBytes additionalBytes=$additionalBytes inputLines=$inputLines activeCompileJobs=$activeJobs jobId=$jobId sessionId=$sess processPid=$pid"
+        Log.i(TAG, compileEnterMsg)
+        com.remmi.browser.util.DebugLogManager.log(compileEnterMsg)
 
-      val combinedDefaultRulesText = if (defaultRulesText.isNotBlank()) {
-        "$builtinRulesText\n$defaultRulesText"
-      } else {
-        builtinRulesText
-      }
+        // Reject only empty or obviously corrupted input
+        if (defaultLines.isEmpty() && additionalLines.isEmpty()) {
+          activeCompileJobs.decrementAndGet()
+          Log.d(TAG, "[ADBLOCK_COMPILE] empty or comment-only rulesText, preserving active engine")
+          return@synchronized 0
+        }
 
-      // Start watchdog timer
-      val watchdogCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
-      val watchdogThread = Thread {
-        val checkIntervalsMs = listOf(1000L, 5000L, 10000L, 30000L, 60000L)
-        val startTime = System.currentTimeMillis()
-        for (targetElapsed in checkIntervalsMs) {
-          val now = System.currentTimeMillis()
-          val sleepNeeded = targetElapsed - (now - startTime)
-          if (sleepNeeded > 0) {
+        val builtinRulesText = DEFAULT_DOMAINS.joinToString("\n") { "||$it^" } + "\n" +
+          DEFAULT_PATTERNS.joinToString("\n")
+
+        val combinedDefaultRulesText = if (defaultRulesText.isNotBlank()) {
+          "$builtinRulesText\n$defaultRulesText"
+        } else {
+          builtinRulesText
+        }
+
+        val watchdogHandle = com.remmi.browser.util.HangWatchdog.startCompileWatchdog(
+          jobId = jobId,
+          inputBytes = totalInputBytes,
+          activeCompileJobs = activeJobs
+        )
+
+        var compiledCount = 0
+        val oldGen = getEngineGeneration()
+
+        val compileStartMsg = "[COMPILE_START] jobId=$jobId inputBytes=$totalInputBytes defaultBytes=$defaultBytes additionalBytes=$additionalBytes inputLines=$inputLines activeCompileJobs=$activeJobs ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} sessionId=$sess processPid=$pid"
+        Log.i(TAG, compileStartMsg)
+        com.remmi.browser.util.DebugLogManager.log(compileStartMsg)
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_START]")
+
+        try {
+          if (isNativeLoaded) {
             try {
-              Thread.sleep(sleepNeeded)
-            } catch (_: InterruptedException) {
-              return@Thread
+              Log.i(TAG, "[COMPILE_ENGINE_CREATE_START]")
+              com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
+              val metricsJson = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
+              com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_PARSE_DONE]")
+              val metricsObj = org.json.JSONObject(metricsJson)
+              compiledCount = metricsObj.optInt("parsedCandidates", 0)
+              val parseDoneMsg = "[COMPILE_PARSE_DONE] parsedRules=$compiledCount ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+              Log.i(TAG, parseDoneMsg)
+              com.remmi.browser.util.DebugLogManager.log(parseDoneMsg)
+              Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
+              com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_ENGINE_CREATED]")
+              val engineCreatedMsg = "[COMPILE_ENGINE_CREATED] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+              Log.i(TAG, engineCreatedMsg)
+              com.remmi.browser.util.DebugLogManager.log(engineCreatedMsg)
+              com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
+            } catch (e: Throwable) {
+              com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
+              Log.e(TAG, "Native compile rules failed: ${e.message}", e)
             }
           }
-          if (watchdogCancelled.get()) return@Thread
-          val actualElapsed = System.currentTimeMillis() - startTime
-          Log.d(TAG, "[COMPILE_WATCHDOG] elapsedMs=$actualElapsed jobId=$jobId generation=$currentGen")
-          if (actualElapsed >= 60000L) {
-            Log.w(
-              TAG,
-              "[COMPILE_WATCHDOG_OVERDUE] elapsedMs=$actualElapsed jobId=$jobId thread=${thread.name} (id=${thread.id}) generation=$currentGen inputBytes=$totalInputBytes defaultBytes=$defaultBytes additionalBytes=$additionalBytes inputLines=$inputLines memory=${getMemoryStats()}"
+
+          // Prepare new FallbackEngineSet completely before swap
+          val newBlockedHostnames = mutableSetOf<String>()
+          val newBlockedSubstrings = mutableListOf<String>()
+          val newAllowList = mutableSetOf<String>()
+          val newNetworkRules = mutableListOf<FallbackNetworkRule>()
+          val newCosmeticRules = mutableListOf<Pair<String?, String>>()
+          val newAdditionalCosmeticRules = mutableListOf<Pair<String?, String>>()
+          val newProceduralFilters = mutableListOf<String>()
+          val newCosmeticExceptions = mutableSetOf<String>()
+
+          newBlockedHostnames.addAll(DEFAULT_DOMAINS)
+          for (d in DEFAULT_DOMAINS) {
+            newNetworkRules.add(
+              FallbackNetworkRule(
+                raw = "||$d^",
+                isException = false,
+                isImportant = false,
+                domainPattern = d,
+                substringPattern = null
+              )
             )
           }
-        }
-      }.apply {
-        isDaemon = true
-        name = "compile-watchdog-$jobId"
-        start()
-      }
+          newBlockedSubstrings.addAll(DEFAULT_PATTERNS)
+          for (p in DEFAULT_PATTERNS) {
+            newNetworkRules.add(
+              FallbackNetworkRule(
+                raw = p,
+                isException = false,
+                isImportant = false,
+                domainPattern = null,
+                substringPattern = p
+              )
+            )
+          }
 
-      var compiledCount = 0
-      val oldGen = getEngineGeneration()
-      Log.i(TAG, "[COMPILE_PARSE_START]")
-      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_START]")
-
-      if (isNativeLoaded) {
-        try {
-          Log.i(TAG, "[COMPILE_ENGINE_CREATE_START]")
-          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
-          val metricsJson = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
-          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_PARSE_DONE]")
-          val metricsObj = org.json.JSONObject(metricsJson)
-          compiledCount = metricsObj.optInt("parsedCandidates", 0)
-          Log.i(TAG, "[COMPILE_PARSE_DONE] parsedRules=$compiledCount")
-          Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
-          Log.d(TAG, "[COMPILE_MEM_PARSE_DONE] ${getMemoryStats()}")
-          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_ENGINE_CREATED]")
-          Log.i(TAG, "[COMPILE_ENGINE_CREATED]")
-          Log.d(TAG, "[COMPILE_MEM_ENGINE_CREATED] ${getMemoryStats()}")
-          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
-        } catch (e: Throwable) {
-          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
-          Log.e(TAG, "Native compile rules failed: ${e.message}", e)
-        }
-      }
-
-      // Prepare new FallbackEngineSet completely before swap
-      val newBlockedHostnames = mutableSetOf<String>()
-      val newBlockedSubstrings = mutableListOf<String>()
-      val newAllowList = mutableSetOf<String>()
-      val newNetworkRules = mutableListOf<FallbackNetworkRule>()
-      val newCosmeticRules = mutableListOf<Pair<String?, String>>()
-      val newAdditionalCosmeticRules = mutableListOf<Pair<String?, String>>()
-      val newProceduralFilters = mutableListOf<String>()
-      val newCosmeticExceptions = mutableSetOf<String>()
-
-      newBlockedHostnames.addAll(DEFAULT_DOMAINS)
-      for (d in DEFAULT_DOMAINS) {
-        newNetworkRules.add(
-          FallbackNetworkRule(
-            raw = "||$d^",
-            isException = false,
-            isImportant = false,
-            domainPattern = d,
-            substringPattern = null
-          )
-        )
-      }
-      newBlockedSubstrings.addAll(DEFAULT_PATTERNS)
-      for (p in DEFAULT_PATTERNS) {
-        newNetworkRules.add(
-          FallbackNetworkRule(
-            raw = p,
-            isException = false,
-            isImportant = false,
-            domainPattern = null,
-            substringPattern = p
-          )
-        )
-      }
-
-      fun parseToFallback(rules: String, isAdditional: Boolean) {
-        if (rules.isBlank()) return
-        rules.lines().forEach { line ->
-          val trimmed = line.trim()
-          if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
-            if (trimmed.contains("#@#")) {
-              newCosmeticExceptions.add(trimmed)
-            } else if (trimmed.contains("#$#")) {
-              val parts = trimmed.split("#$#", limit = 2)
-              if (parts.size == 2 && parts[1].isNotBlank()) {
-                newProceduralFilters.add(parts[1].trim())
-              }
-            } else if (trimmed.contains("##")) {
-              val parts = trimmed.split("##", limit = 2)
-              val domain = parts[0].trim().ifEmpty { null }
-              val selector = parts[1].trim()
-              if (selector.isNotEmpty()) {
-                if (isAdditional) newAdditionalCosmeticRules.add(Pair(domain, selector))
-                else newCosmeticRules.add(Pair(domain, selector))
-              }
-            } else {
-              val parsedNet = parseNetworkRule(trimmed)
-              if (parsedNet != null) {
-                newNetworkRules.add(0, parsedNet)
-              }
-              if (!trimmed.contains('$')) {
-                if (trimmed.startsWith("@@")) {
-                  val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
-                  if (clean.isNotEmpty()) newAllowList.add(clean)
-                } else if (trimmed.startsWith("||")) {
-                  val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
-                  if (clean.isNotEmpty()) newBlockedHostnames.add(clean)
+          fun parseToFallback(rules: String, isAdditional: Boolean) {
+            if (rules.isBlank()) return
+            rules.lines().forEach { line ->
+              val trimmed = line.trim()
+              if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
+                if (trimmed.contains("#@#")) {
+                  newCosmeticExceptions.add(trimmed)
+                } else if (trimmed.contains("#$#")) {
+                  val parts = trimmed.split("#$#", limit = 2)
+                  if (parts.size == 2 && parts[1].isNotBlank()) {
+                    newProceduralFilters.add(parts[1].trim())
+                  }
+                } else if (trimmed.contains("##")) {
+                  val parts = trimmed.split("##", limit = 2)
+                  val domain = parts[0].trim().ifEmpty { null }
+                  val selector = parts[1].trim()
+                  if (selector.isNotEmpty()) {
+                    if (isAdditional) newAdditionalCosmeticRules.add(Pair(domain, selector))
+                    else newCosmeticRules.add(Pair(domain, selector))
+                  }
                 } else {
-                  newBlockedSubstrings.add(trimmed)
+                  val parsedNet = parseNetworkRule(trimmed)
+                  if (parsedNet != null) {
+                    newNetworkRules.add(0, parsedNet)
+                  }
+                  if (!trimmed.contains('$')) {
+                    if (trimmed.startsWith("@@")) {
+                      val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
+                      if (clean.isNotEmpty()) newAllowList.add(clean)
+                    } else if (trimmed.startsWith("||")) {
+                      val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
+                      if (clean.isNotEmpty()) newBlockedHostnames.add(clean)
+                    } else {
+                      newBlockedSubstrings.add(trimmed)
+                    }
+                  }
                 }
+                if (!isNativeLoaded) compiledCount++
               }
             }
-            if (!isNativeLoaded) compiledCount++
           }
+
+          parseToFallback(combinedDefaultRulesText, false)
+          parseToFallback(additionalRulesText, true)
+
+          if (!isNativeLoaded) {
+            val parseDoneMsg = "[COMPILE_PARSE_DONE] parsedRules=$compiledCount ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+            Log.i(TAG, parseDoneMsg)
+            com.remmi.browser.util.DebugLogManager.log(parseDoneMsg)
+            val engineCreatedMsg = "[COMPILE_ENGINE_CREATED] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+            Log.i(TAG, engineCreatedMsg)
+            com.remmi.browser.util.DebugLogManager.log(engineCreatedMsg)
+          }
+
+          // Single Atomic publication
+          val swapStartMsg = "[COMPILE_SWAP_START] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+          Log.i(TAG, swapStartMsg)
+          com.remmi.browser.util.DebugLogManager.log(swapStartMsg)
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
+
+          val newGen = localEngineGeneration.incrementAndGet()
+          activeFallbackEngine = FallbackEngineSet(
+            blockedHostnames = newBlockedHostnames,
+            blockedSubstrings = newBlockedSubstrings,
+            allowList = newAllowList,
+            fallbackNetworkRules = newNetworkRules,
+            fallbackCosmeticRules = newCosmeticRules,
+            fallbackAdditionalCosmeticRules = newAdditionalCosmeticRules,
+            fallbackProceduralFilters = newProceduralFilters,
+            fallbackCosmeticExceptions = newCosmeticExceptions,
+            generation = newGen
+          )
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
+          val swapDoneMsg = "[COMPILE_SWAP_DONE] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+          Log.i(TAG, swapDoneMsg)
+          com.remmi.browser.util.DebugLogManager.log(swapDoneMsg)
+          Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
+
+          val totalElapsed = android.os.SystemClock.elapsedRealtime() - compileStartRealtime
+          watchdogHandle.stop(totalElapsed)
+
+          Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_DONE] compiled=$compiledCount total=${getLoadedRulesCount()} elapsedMs=$totalElapsed")
+          return@synchronized compiledCount
+        } finally {
+          activeCompileJobs.decrementAndGet()
         }
       }
-
-      parseToFallback(combinedDefaultRulesText, false)
-      parseToFallback(additionalRulesText, true)
-
-      if (!isNativeLoaded) {
-        Log.i(TAG, "[COMPILE_PARSE_DONE] parsedRules=$compiledCount")
-        Log.i(TAG, "[COMPILE_ENGINE_CREATED]")
-      }
-
-      // Single Atomic publication
-      Log.i(TAG, "[COMPILE_SWAP_START]")
-      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
-      val newGen = localEngineGeneration.incrementAndGet()
-      activeFallbackEngine = FallbackEngineSet(
-        blockedHostnames = newBlockedHostnames,
-        blockedSubstrings = newBlockedSubstrings,
-        allowList = newAllowList,
-        fallbackNetworkRules = newNetworkRules,
-        fallbackCosmeticRules = newCosmeticRules,
-        fallbackAdditionalCosmeticRules = newAdditionalCosmeticRules,
-        fallbackProceduralFilters = newProceduralFilters,
-        fallbackCosmeticExceptions = newCosmeticExceptions,
-        generation = newGen
-      )
-      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
-      Log.i(TAG, "[COMPILE_SWAP_DONE]")
-      Log.d(TAG, "[COMPILE_MEM_SWAP_DONE] ${getMemoryStats()}")
-      Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
-
-      watchdogCancelled.set(true)
-      watchdogThread.interrupt()
-
-      Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_DONE] compiled=$compiledCount total=${getLoadedRulesCount()}")
-      return compiledCount
     }
   }
 

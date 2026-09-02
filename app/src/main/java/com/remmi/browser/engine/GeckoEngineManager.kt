@@ -155,6 +155,7 @@ class GeckoEngineManager private constructor(private val context: Context) {
       return
     }
 
+    val watchdog = com.remmi.browser.util.HangWatchdog.startGeckoInitWatchdog()
     val startTime = android.os.SystemClock.elapsedRealtime()
     Log.i(TAG, "Initializing GeckoRuntime with Process Isolation & WebRender...")
 
@@ -233,6 +234,7 @@ class GeckoEngineManager private constructor(private val context: Context) {
     runtime = rt
     applyPrivacyProfile(PrivacyProfile.SHIELD)
     val duration = android.os.SystemClock.elapsedRealtime() - startTime
+    watchdog.stop()
     Log.i(TAG, "GeckoRuntime initialization completed in ${duration}ms (READY)")
   }
 
