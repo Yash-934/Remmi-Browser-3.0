@@ -360,6 +360,7 @@ connectNative();
 
 // 3. Priority scheduling for dynamic cosmetic queries
 const MAX_CONCURRENT_CLASS_ID_COSMETICS = 2;
+const MAX_COSMETIC_QUEUE_DEPTH = 10;
 let activeClassIdCosmetics = 0;
 const classIdCosmeticQueue = [];
 
@@ -374,7 +375,7 @@ function scheduleClassIdCosmetic(task) {
           activeClassIdCosmetics--;
           if (classIdCosmeticQueue.length > 0) {
             const next = classIdCosmeticQueue.shift();
-            next();
+            if (next) next();
           }
         });
     };
@@ -382,16 +383,38 @@ function scheduleClassIdCosmetic(task) {
     if (activeClassIdCosmetics < MAX_CONCURRENT_CLASS_ID_COSMETICS) {
       execute();
     } else {
-      classIdCosmeticQueue.push(execute);
+      if (classIdCosmeticQueue.length >= MAX_COSMETIC_QUEUE_DEPTH) {
+        // Coalesce / drop oldest superseded cosmetic task
+        const dropped = classIdCosmeticQueue.shift();
+        if (dropped && dropped.cancel) {
+          dropped.cancel();
+        }
+      }
+      const queuedTask = () => execute();
+      queuedTask.cancel = () => resolve({ ok: true, hideSelectors: [] });
+      classIdCosmeticQueue.push(queuedTask);
     }
   });
 }
 
-// Cosmetic decision cache
+// Cosmetic decision cache with byte bounding & eviction telemetry
 const COSMETIC_CACHE = new Map();
 const INFLIGHT_COSMETIC = new Map();
-const MAX_COSMETIC_CACHE_SIZE = 400;
+const TAB_COSMETIC_KEYS = new Map(); // tabId -> Set of cacheKeys
+const MAX_COSMETIC_CACHE_SIZE = 200;
+const MAX_COSMETIC_CACHE_BYTES = 2 * 1024 * 1024; // 2MB limit
 const COSMETIC_CACHE_TTL_MS = 300000; // 5 minutes
+
+let COSMETIC_CACHE_BYTES = 0;
+let COSMETIC_CACHE_EVICTIONS = 0;
+
+function estimateItemBytes(key, data) {
+  try {
+    return (key ? key.length * 2 : 0) + (data ? JSON.stringify(data).length * 2 : 0) + 64;
+  } catch (_e) {
+    return 256;
+  }
+}
 
 function getCachedCosmetic(key) {
   const item = COSMETIC_CACHE.get(key);
@@ -400,18 +423,70 @@ function getCachedCosmetic(key) {
     return item.data;
   }
   COSMETIC_CACHE.delete(key);
+  COSMETIC_CACHE_BYTES = Math.max(0, COSMETIC_CACHE_BYTES - (item.bytes || 256));
+  COSMETIC_CACHE_EVICTIONS++;
   return null;
 }
 
-function setCachedCosmetic(key, data) {
-  if (COSMETIC_CACHE.size >= MAX_COSMETIC_CACHE_SIZE) {
+function setCachedCosmetic(key, data, tabId) {
+  const itemBytes = estimateItemBytes(key, data);
+  
+  while (COSMETIC_CACHE.size >= MAX_COSMETIC_CACHE_SIZE || (COSMETIC_CACHE_BYTES + itemBytes > MAX_COSMETIC_CACHE_BYTES && COSMETIC_CACHE.size > 0)) {
     const firstKey = COSMETIC_CACHE.keys().next().value;
-    if (firstKey) COSMETIC_CACHE.delete(firstKey);
+    if (!firstKey) break;
+    const oldItem = COSMETIC_CACHE.get(firstKey);
+    COSMETIC_CACHE.delete(firstKey);
+    if (oldItem) {
+      COSMETIC_CACHE_BYTES = Math.max(0, COSMETIC_CACHE_BYTES - (oldItem.bytes || 256));
+    }
+    COSMETIC_CACHE_EVICTIONS++;
   }
+
   COSMETIC_CACHE.set(key, {
     data: data,
-    ts: Date.now()
+    ts: Date.now(),
+    bytes: itemBytes
   });
+  COSMETIC_CACHE_BYTES += itemBytes;
+
+  if (tabId !== undefined && tabId !== null) {
+    if (!TAB_COSMETIC_KEYS.has(tabId)) {
+      TAB_COSMETIC_KEYS.set(tabId, new Set());
+    }
+    TAB_COSMETIC_KEYS.get(tabId).add(key);
+  }
+}
+
+function purgeTabCosmeticState(tabId) {
+  if (!tabId || !TAB_COSMETIC_KEYS.has(tabId)) return;
+  const keys = TAB_COSMETIC_KEYS.get(tabId);
+  if (keys) {
+    for (const k of keys) {
+      const item = COSMETIC_CACHE.get(k);
+      if (item) {
+        COSMETIC_CACHE_BYTES = Math.max(0, COSMETIC_CACHE_BYTES - (item.bytes || 256));
+      }
+      COSMETIC_CACHE.delete(k);
+      INFLIGHT_COSMETIC.delete(k);
+    }
+  }
+  TAB_COSMETIC_KEYS.delete(tabId);
+}
+
+// Tab navigation & destruction listeners to enforce per-page lifecycle release
+if (typeof browser !== 'undefined' && browser.tabs) {
+  if (browser.tabs.onRemoved) {
+    browser.tabs.onRemoved.addListener((tabId) => {
+      purgeTabCosmeticState(tabId);
+    });
+  }
+  if (browser.tabs.onUpdated) {
+    browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+      if (changeInfo.status === "loading" || changeInfo.url) {
+        purgeTabCosmeticState(tabId);
+      }
+    });
+  }
 }
 
 // 4. Content Script Message Listener (Cosmetics & Click Inspection)
@@ -483,7 +558,8 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }, 2000, "COSMETIC_RESOURCES_TIMEOUT");
         const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
-          setCachedCosmetic(cacheKey, resp);
+          const tabId = _sender && _sender.tab ? _sender.tab.id : null;
+          setCachedCosmetic(cacheKey, resp, tabId);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {
@@ -542,7 +618,8 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }, 2000, "HIDDEN_CLASS_ID_TIMEOUT");
         const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
-          setCachedCosmetic(cacheKey, resp);
+          const tabId = _sender && _sender.tab ? _sender.tab.id : null;
+          setCachedCosmetic(cacheKey, resp, tabId);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {

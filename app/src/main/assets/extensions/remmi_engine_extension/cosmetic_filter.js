@@ -10,15 +10,17 @@
 
   const STYLE_ID_PREFIX = 'remmi-cosmetic-style-';
   const MAX_SELECTORS_PER_TAG = 800;
+  const MAX_PENDING_BATCH = 200;
   const SEEN_CLASSES = new Set();
   const SEEN_IDS = new Set();
   const INJECTED_SELECTORS = new Set();
 
   let styleTagIndex = 0;
-  let isScanning = false;
   let scanTimer = null;
-  let pendingClasses = [];
-  let pendingIds = [];
+  let isInflight = false;
+  const pendingClassesSet = new Set();
+  const pendingIdsSet = new Set();
+  let domObserver = null;
 
   // Used to prevent extremely malformed selectors from crashing the style injection
   function isSafeCssSelector(selector) {
@@ -95,11 +97,18 @@
   }
 
   function flushDynamicSelectors() {
-    if (pendingClasses.length === 0 && pendingIds.length === 0) return;
+    if (isInflight) return;
+    if (pendingClassesSet.size === 0 && pendingIdsSet.size === 0) return;
 
-    const classesToSend = pendingClasses.splice(0, 100);
-    const idsToSend = pendingIds.splice(0, 100);
+    // Coalesce up to MAX_PENDING_BATCH
+    const classesToSend = Array.from(pendingClassesSet).slice(0, MAX_PENDING_BATCH);
+    const idsToSend = Array.from(pendingIdsSet).slice(0, MAX_PENDING_BATCH);
 
+    // Remove drained items from pending sets
+    for (let i = 0; i < classesToSend.length; i++) pendingClassesSet.delete(classesToSend[i]);
+    for (let i = 0; i < idsToSend.length; i++) pendingIdsSet.delete(idsToSend[i]);
+
+    isInflight = true;
     try {
       browser.runtime
         .sendMessage({
@@ -108,6 +117,7 @@
           ids: idsToSend
         })
         .then((response) => {
+          isInflight = false;
           if (response && response.ok) {
             const allHide = [];
             if (Array.isArray(response.hideSelectors) && response.hideSelectors.length > 0) {
@@ -120,16 +130,19 @@
               injectSelectors(allHide);
             }
           }
-          if (pendingClasses.length > 0 || pendingIds.length > 0) {
+          if (pendingClassesSet.size > 0 || pendingIdsSet.size > 0) {
             scheduleScan();
           }
         })
         .catch((_e) => {
-          if (pendingClasses.length > 0 || pendingIds.length > 0) {
+          isInflight = false;
+          if (pendingClassesSet.size > 0 || pendingIdsSet.size > 0) {
             scheduleScan();
           }
         });
-    } catch (_e) {}
+    } catch (_e) {
+      isInflight = false;
+    }
   }
 
   function scheduleScan() {
@@ -141,13 +154,13 @@
   }
 
   function collectNode(node) {
-    if (!(node instanceof Element)) return;
+    if (!(node instanceof Element)) return false;
     let foundNew = false;
 
     const id = node.id;
     if (id && typeof id === 'string' && id.length < 120 && !SEEN_IDS.has(id)) {
       SEEN_IDS.add(id);
-      pendingIds.push(id);
+      pendingIdsSet.add(id);
       foundNew = true;
     }
 
@@ -156,7 +169,7 @@
         const cls = node.classList[j];
         if (cls && typeof cls === 'string' && cls.length < 120 && !SEEN_CLASSES.has(cls)) {
           SEEN_CLASSES.add(cls);
-          pendingClasses.push(cls);
+          pendingClassesSet.add(cls);
           foundNew = true;
         }
       }
@@ -186,7 +199,11 @@
       return;
     }
 
-    const observer = new MutationObserver((mutations) => {
+    if (domObserver) {
+      domObserver.disconnect();
+    }
+
+    domObserver = new MutationObserver((mutations) => {
       let shouldScan = false;
       for (let i = 0; i < mutations.length; i++) {
         const m = mutations[i];
@@ -207,7 +224,7 @@
       }
     });
 
-    observer.observe(target, {
+    domObserver.observe(target, {
       childList: true,
       subtree: true,
       attributes: true,
@@ -215,10 +232,30 @@
     });
   }
 
+  function cleanupPageState() {
+    if (domObserver) {
+      try { domObserver.disconnect(); } catch (_e) {}
+      domObserver = null;
+    }
+    if (scanTimer) {
+      clearTimeout(scanTimer);
+      scanTimer = null;
+    }
+    pendingClassesSet.clear();
+    pendingIdsSet.clear();
+    SEEN_CLASSES.clear();
+    SEEN_IDS.clear();
+    INJECTED_SELECTORS.clear();
+    isInflight = false;
+  }
+
+  window.addEventListener('pagehide', cleanupPageState, { capture: true, once: true });
+  window.addEventListener('unload', cleanupPageState, { capture: true, once: true });
+
   function startCosmeticPipeline() {
     setupMutationObserver();
     
-    // Initial scan of whatever is already in the DOM (very early at document_start usually just <html> or <head>)
+    // Initial scan of whatever is already in the DOM
     if (document.documentElement) {
       if (collectNodeTree(document.documentElement)) {
         scheduleScan();

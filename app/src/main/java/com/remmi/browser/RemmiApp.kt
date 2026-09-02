@@ -49,6 +49,8 @@ class RemmiApp : Application(), SingletonImageLoader.Factory {
     com.remmi.browser.util.DebugLogManager.init(this)
     com.remmi.browser.util.CrashHandlerHelper.onProcessStart(this)
     com.remmi.browser.util.HangWatchdog.startMainThreadWatchdog()
+    com.remmi.browser.util.ProcessMemoryTelemetry.init(this)
+    com.remmi.browser.util.ProcessMemoryTelemetry.startSampling()
 
     // 2. Global Uncaught Exception Handler to capture crash logs & export to Downloads
     com.remmi.browser.util.CrashHandlerHelper.install(this)
