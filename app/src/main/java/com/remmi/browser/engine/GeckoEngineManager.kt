@@ -120,6 +120,9 @@ class GeckoEngineManager private constructor(private val context: Context) {
   @Volatile
   var currentProfile: PrivacyProfile = PrivacyProfile.SHIELD
   private val activeSessions = mutableMapOf<String, GeckoSession>()
+  
+  fun getSessionForTest(tabId: String): GeckoSession? = activeSessions[tabId]
+  fun getAttachedViewForTest(tabId: String): org.mozilla.geckoview.GeckoView? = attachedViews[tabId]
   private val sessionCallbacks = mutableMapOf<String, GeckoTabCallbacks>()
   private val sessionNavStates = mutableMapOf<String, Pair<Boolean, Boolean>>()
   private val mainHandler = Handler(Looper.getMainLooper())
@@ -704,6 +707,20 @@ class GeckoEngineManager private constructor(private val context: Context) {
       Log.e(TAG, "[GECKO] attachView failed: runtime is not ready")
       return@withContext
     }
+
+    val currentAttachedView = attachedViews[tabId]
+    if (existingSession != null && existingSession.isOpen && currentAttachedView === geckoView && geckoView.session === existingSession) {
+      val viewId = "0x" + Integer.toHexString(System.identityHashCode(geckoView))
+      val skipMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_SKIP_ALREADY_ATTACHED] tabId=$tabId session=$existingSessId view=$viewId gen=$gen reason=idempotency_match"
+      Log.i(TAG, skipMsg)
+      com.remmi.browser.util.DebugLogManager.log(skipMsg)
+      
+      existingSession.setActive(true)
+      _viewAttachmentStates.getOrPut(tabId) { MutableStateFlow(false) }.value = true
+      dispatchPendingNavigationIfReady(tabId)
+      return@withContext
+    }
+
     val session = getOrCreateSessionInternal(tabId, profile, securityLevel, containerType, isDesktopMode)
     val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
     try {

@@ -124,14 +124,25 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
   }
 
   suspend fun applyPreferences(prefs: Map<String, Any>, branch: Int = PREF_BRANCH_USER): Boolean = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+    val startTime = android.os.SystemClock.elapsedRealtime()
+    val totalCount = prefs.size
+
     if (prefs.isEmpty()) {
+      val threadName = Thread.currentThread().name
+      val isUiThread = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+      DebugLogManager.log("[FORENSIC] [GECKO_PREF_APPLY_TIMING] count=0 changedCount=0 skippedCount=0 elapsedMs=${android.os.SystemClock.elapsedRealtime() - startTime} thread=$threadName isUiThread=$isUiThread")
       cont.resume(true)
       return@suspendCancellableCoroutine
     }
 
     val changedPrefs = prefs.filter { (k, v) -> appliedPrefsCache[k] != v }
+    val changedCount = changedPrefs.size
+    val skippedCount = totalCount - changedCount
+
     if (changedPrefs.isEmpty()) {
-      DebugLogManager.log("[GECKO_PREFS] IDEMPOTENT_SKIP all ${prefs.size} preferences already active")
+      val threadName = Thread.currentThread().name
+      val isUiThread = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+      DebugLogManager.log("[FORENSIC] [GECKO_PREF_APPLY_TIMING] count=$totalCount changedCount=0 skippedCount=$skippedCount elapsedMs=${android.os.SystemClock.elapsedRealtime() - startTime} thread=$threadName isUiThread=$isUiThread")
       cont.resume(true)
       return@suspendCancellableCoroutine
     }
@@ -198,6 +209,11 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
             
             Log.d(TAG, "[ROUTE] GECKO_PREF_SUMMARY total=$total successful=$successful failed=$failed criticalFailed=$criticalFailed")
             DebugLogManager.log("[ROUTE] GECKO_PREF_SUMMARY total=$total success=$successful failed=$failed criticalFailed=$criticalFailed")
+            
+            val elapsedMs = android.os.SystemClock.elapsedRealtime() - startTime
+            val threadName = Thread.currentThread().name
+            val isUiThread = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+            DebugLogManager.log("[FORENSIC] [GECKO_PREF_APPLY_TIMING] count=$totalCount changedCount=$changedCount skippedCount=$skippedCount elapsedMs=$elapsedMs thread=$threadName isUiThread=$isUiThread")
 
             if (criticalFailed > 0) {
               Log.e(TAG, "[ROUTE] GECKO_PREF_FAILURE error=CRITICAL Ghost preferences failed: $criticalFailedList")
