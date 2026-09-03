@@ -27,6 +27,33 @@ class TabManager {
   )
   val tabs: StateFlow<List<BrowserTab>> = _tabs.asStateFlow()
 
+  // Forensic Churn Rate Trackers
+  val trackerEventCounter = java.util.concurrent.atomic.AtomicInteger(0)
+  val tabUpdateCounter = java.util.concurrent.atomic.AtomicInteger(0)
+  val stateEmissionCounter = java.util.concurrent.atomic.AtomicInteger(0)
+  val recompositionCounter = java.util.concurrent.atomic.AtomicInteger(0)
+  private val lastRateLogTimestamp = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+
+  fun recordRecomposition(tabId: String? = null) {
+    recompositionCounter.incrementAndGet()
+    checkAndEmitTabStateRate(tabId)
+  }
+
+  fun checkAndEmitTabStateRate(tabId: String? = null) {
+    val now = System.currentTimeMillis()
+    val last = lastRateLogTimestamp.get()
+    if (now - last >= 1000L && lastRateLogTimestamp.compareAndSet(last, now)) {
+      val trackers = trackerEventCounter.getAndSet(0)
+      val updates = tabUpdateCounter.getAndSet(0)
+      val emissions = stateEmissionCounter.getAndSet(0)
+      val recomps = recompositionCounter.getAndSet(0)
+      val targetTab = tabId ?: activeTab?.id ?: "unknown"
+      val msg = "[FORENSIC][TAB_STATE_RATE] tabId=$targetTab trackerEvents=$trackers tabUpdates=$updates stateEmissions=$emissions recompositions=$recomps"
+      Log.i("TabManager", msg)
+      DebugLogManager.log(msg)
+    }
+  }
+
   private val _tabGroups = MutableStateFlow<List<TabGroup>>(emptyList())
   val tabGroups: StateFlow<List<TabGroup>> = _tabGroups.asStateFlow()
 
@@ -157,7 +184,10 @@ class TabManager {
   }
 
   fun updateTab(tabId: String, update: (BrowserTab) -> BrowserTab) {
+    tabUpdateCounter.incrementAndGet()
     _tabs.value = _tabs.value.map { if (it.id == tabId) update(it) else it }
+    stateEmissionCounter.incrementAndGet()
+    checkAndEmitTabStateRate(tabId)
   }
 
   fun switchTab(index: Int) {
@@ -371,6 +401,7 @@ class TabManager {
   }
 
   fun incrementTrackerCount(tabId: String, blockedDomain: String) {
+    trackerEventCounter.incrementAndGet()
     val category = com.remmi.browser.security.TrackerClassifier.classify(blockedDomain)
     updateTab(tabId) { tab ->
       val newLog = if (tab.blockedLog.size >= 100) tab.blockedLog.drop(1) + blockedDomain else tab.blockedLog + blockedDomain

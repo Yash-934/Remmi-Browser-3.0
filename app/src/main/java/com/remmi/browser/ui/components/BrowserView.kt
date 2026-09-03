@@ -259,7 +259,7 @@ fun BrowserView(
     } else {
       AndroidView(
         factory = { ctx ->
-          GeckoView(ctx).apply {
+          val gv = GeckoView(ctx).apply {
             layoutParams = ViewGroup.LayoutParams(
               ViewGroup.LayoutParams.MATCH_PARENT,
               ViewGroup.LayoutParams.MATCH_PARENT
@@ -270,24 +270,38 @@ fun BrowserView(
             isNestedScrollingEnabled = false
             tag = tab.id
             geckoViewRef = this
-
-            scope.launch {
-              geckoEngine.attachView(
-                tabId = tab.id,
-                geckoView = this@apply,
-                profile = tab.profile,
-                isDesktopMode = tab.isDesktopMode,
-                securityLevel = tab.securityLevel,
-                containerType = tab.containerType,
-                callbacks = tabCallbacks,
-              )
-            }
           }
+          val gvId = "0x" + Integer.toHexString(System.identityHashCode(gv))
+          val now = android.os.SystemClock.elapsedRealtime()
+          val msg = "[FORENSIC][VIEW_FACTORY] tabId=${tab.id} view=$gvId tag=${gv.tag} url=${tab.url} elapsedRealtime=$now"
+          android.util.Log.i("BrowserView", msg)
+          com.remmi.browser.util.DebugLogManager.log(msg)
+
+          scope.launch {
+            geckoEngine.attachView(
+              tabId = tab.id,
+              geckoView = gv,
+              profile = tab.profile,
+              isDesktopMode = tab.isDesktopMode,
+              securityLevel = tab.securityLevel,
+              containerType = tab.containerType,
+              callbacks = tabCallbacks,
+            )
+          }
+          gv
         },
         update = { geckoView ->
           geckoViewRef = geckoView
-          if (geckoView.tag != tab.id) {
-            val oldTabId = geckoView.tag as? String
+          val gvId = "0x" + Integer.toHexString(System.identityHashCode(geckoView))
+          val now = android.os.SystemClock.elapsedRealtime()
+          val prevTag = geckoView.tag as? String
+          val isTagMatch = prevTag == tab.id
+          val updateMsg = "[FORENSIC][VIEW_UPDATE] tabId=${tab.id} view=$gvId tag=$prevTag isTagMatch=$isTagMatch url=${tab.url} elapsedRealtime=$now"
+          android.util.Log.i("BrowserView", updateMsg)
+          com.remmi.browser.util.DebugLogManager.log(updateMsg)
+
+          if (!isTagMatch) {
+            val oldTabId = prevTag
             geckoView.tag = tab.id
             geckoView.visibility = View.VISIBLE
             scope.launch {
@@ -308,6 +322,12 @@ fun BrowserView(
         },
         onRelease = { geckoView ->
           val currentTag = geckoView.tag as? String ?: tab.id
+          val gvId = "0x" + Integer.toHexString(System.identityHashCode(geckoView))
+          val now = android.os.SystemClock.elapsedRealtime()
+          val relMsg = "[FORENSIC][VIEW_ON_RELEASE] tabId=${tab.id} view=$gvId tag=$currentTag url=${tab.url} elapsedRealtime=$now"
+          android.util.Log.i("BrowserView", relMsg)
+          com.remmi.browser.util.DebugLogManager.log(relMsg)
+
           com.remmi.browser.engine.TabThumbnailManager.getInstance(context).captureGeckoView(tab.id, geckoView)
           geckoViewRef = null
           geckoView.tag = null

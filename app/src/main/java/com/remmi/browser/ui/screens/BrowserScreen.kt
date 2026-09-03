@@ -218,6 +218,9 @@ fun BrowserScreen(
   val fillPrompt by autofillHelper.fillPrompt.collectAsState()
 
   val activeTab = tabs.getOrNull(activeTabIndex) ?: tabs.firstOrNull() ?: BrowserTab()
+  SideEffect {
+    tabManager.recordRecomposition(activeTab.id)
+  }
 
   LaunchedEffect(
     settings.dnsProvider,

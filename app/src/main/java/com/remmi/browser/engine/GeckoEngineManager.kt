@@ -452,14 +452,23 @@ class GeckoEngineManager private constructor(private val context: Context) {
     newSession.navigationDelegate = object : GeckoSession.NavigationDelegate {
       override fun onLoadRequest(session: GeckoSession, request: GeckoSession.NavigationDelegate.LoadRequest): GeckoResult<AllowOrDeny>? {
         val url = request.uri ?: ""
-        Log.i(TAG, "[FORENSIC] NAV_START tabId=$tabId url=$url")
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val viewId = attachedViews[tabId]?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val gen = navGenerations[tabId] ?: 0L
+        val now = android.os.SystemClock.elapsedRealtime()
+        val navStartMsg = "[FORENSIC] [NAV_START] tabId=$tabId session=$sessId view=$viewId url=$url gen=$gen elapsedRealtime=$now"
+        Log.i(TAG, navStartMsg)
+        com.remmi.browser.util.DebugLogManager.log(navStartMsg)
+
         val tab = TabManager.getInstance().getTab(tabId)
         val isGhost = (tab?.profile == PrivacyProfile.GHOST) || (currentProfile == PrivacyProfile.GHOST)
         
         val check = com.remmi.browser.security.NavigationSecurityAuthority.validateAndSanitizeNavigation(url, isGhost)
         when (check.decision) {
             com.remmi.browser.security.NavigationDecision.BLOCK -> {
-                Log.e(TAG, "onLoadRequest blocked navigation: ${check.reason}")
+                val blockMsg = "[FORENSIC] [NAV_ERROR] tabId=$tabId session=$sessId view=$viewId url=$url error=security_blocked gen=$gen elapsedRealtime=$now"
+                Log.e(TAG, blockMsg)
+                com.remmi.browser.util.DebugLogManager.log(blockMsg)
                 return GeckoResult.fromValue(AllowOrDeny.DENY)
             }
             com.remmi.browser.security.NavigationDecision.SANITIZE_AND_LOAD,
@@ -482,7 +491,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
         perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
         hasUserGesture: Boolean
       ) {
-        Log.i(TAG, "[FORENSIC] NAV_COMMIT tabId=$tabId url=$url")
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val viewId = attachedViews[tabId]?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val gen = navGenerations[tabId] ?: 0L
+        val now = android.os.SystemClock.elapsedRealtime()
+        val navLocMsg = "[FORENSIC] [NAV_LOCATION] tabId=$tabId session=$sessId view=$viewId url=$url gen=$gen elapsedRealtime=$now"
+        Log.i(TAG, navLocMsg)
+        com.remmi.browser.util.DebugLogManager.log(navLocMsg)
+
         url?.let {
           if (it.isNotBlank() && it != "about:blank") {
             try {
@@ -497,6 +513,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
       }
 
       override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val viewId = attachedViews[tabId]?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val gen = navGenerations[tabId] ?: 0L
+        val now = android.os.SystemClock.elapsedRealtime()
+        val navBackMsg = "[FORENSIC] [NAV_CAN_GO_BACK] tabId=$tabId session=$sessId view=$viewId canGoBack=$canGoBack gen=$gen elapsedRealtime=$now"
+        Log.i(TAG, navBackMsg)
+        com.remmi.browser.util.DebugLogManager.log(navBackMsg)
+
         val current = sessionNavStates[tabId] ?: Pair(false, false)
         val updated = current.copy(first = canGoBack)
         sessionNavStates[tabId] = updated
@@ -514,18 +538,41 @@ class GeckoEngineManager private constructor(private val context: Context) {
     // Wire Progress delegate
     newSession.progressDelegate = object : GeckoSession.ProgressDelegate {
       override fun onPageStart(session: GeckoSession, url: String) {
-        Log.i(TAG, "[FORENSIC] NAV_PROGRESS (start) tabId=$tabId url=$url")
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val viewId = attachedViews[tabId]?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val gen = navGenerations[tabId] ?: 0L
+        val now = android.os.SystemClock.elapsedRealtime()
+        val progMsg = "[FORENSIC] [NAV_PROGRESS] tabId=$tabId session=$sessId view=$viewId url=$url progress=10 gen=$gen state=start elapsedRealtime=$now"
+        Log.i(TAG, progMsg)
+        com.remmi.browser.util.DebugLogManager.log(progMsg)
+
         sessionCallbacks[tabId]?.onLoadingChange(true)
         sessionCallbacks[tabId]?.onProgressChange(10)
       }
 
       override fun onPageStop(session: GeckoSession, success: Boolean) {
-        Log.i(TAG, "[FORENSIC] NAV_STOP tabId=$tabId success=$success")
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val viewId = attachedViews[tabId]?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val currUrl = lastDispatchedUrls[tabId] ?: "unknown"
+        val gen = navGenerations[tabId] ?: 0L
+        val now = android.os.SystemClock.elapsedRealtime()
+        val stopMsg = "[FORENSIC] [NAV_STOP] tabId=$tabId session=$sessId view=$viewId url=$currUrl success=$success gen=$gen elapsedRealtime=$now"
+        Log.i(TAG, stopMsg)
+        com.remmi.browser.util.DebugLogManager.log(stopMsg)
+
         sessionCallbacks[tabId]?.onLoadingChange(false)
         sessionCallbacks[tabId]?.onProgressChange(100)
       }
 
       override fun onProgressChange(session: GeckoSession, progress: Int) {
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val viewId = attachedViews[tabId]?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val currUrl = lastDispatchedUrls[tabId] ?: "unknown"
+        val gen = navGenerations[tabId] ?: 0L
+        val now = android.os.SystemClock.elapsedRealtime()
+        val progMsg = "[FORENSIC] [NAV_PROGRESS] tabId=$tabId session=$sessId view=$viewId url=$currUrl progress=$progress gen=$gen state=update elapsedRealtime=$now"
+        Log.i(TAG, progMsg)
+
         sessionCallbacks[tabId]?.onProgressChange(progress)
       }
 
@@ -540,11 +587,39 @@ class GeckoEngineManager private constructor(private val context: Context) {
     // Wire Content delegate
     newSession.contentDelegate = object : GeckoSession.ContentDelegate {
       override fun onCrash(session: GeckoSession) {
-        Log.e(TAG, "[FORENSIC] CONTENT_CRASH tabId=$tabId")
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val view = attachedViews[tabId]
+        val viewId = view?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val currUrl = lastDispatchedUrls[tabId] ?: "unknown"
+        val gen = navGenerations[tabId] ?: 0L
+        val isOpen = session.isOpen
+        val threadName = Thread.currentThread().name
+        val now = android.os.SystemClock.elapsedRealtime()
+        val crashMsg = "[FORENSIC][CONTENT_CRASH] tabId=$tabId session=$sessId view=$viewId url=$currUrl gen=$gen isOpen=$isOpen thread=$threadName elapsedRealtime=$now"
+        Log.e(TAG, crashMsg)
+        com.remmi.browser.util.DebugLogManager.log(crashMsg)
+
+        val recMsg = "[FORENSIC][CONTENT_RECOVERY_STATE] tabId=$tabId session=$sessId view=$viewId url=$currUrl gen=$gen isOpen=$isOpen action=NONE_RECORDED_ONLY elapsedRealtime=$now"
+        Log.w(TAG, recMsg)
+        com.remmi.browser.util.DebugLogManager.log(recMsg)
       }
 
       override fun onKill(session: GeckoSession) {
-        Log.e(TAG, "[FORENSIC] CONTENT_KILL tabId=$tabId")
+        val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+        val view = attachedViews[tabId]
+        val viewId = view?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+        val currUrl = lastDispatchedUrls[tabId] ?: "unknown"
+        val gen = navGenerations[tabId] ?: 0L
+        val isOpen = session.isOpen
+        val threadName = Thread.currentThread().name
+        val now = android.os.SystemClock.elapsedRealtime()
+        val killMsg = "[FORENSIC][CONTENT_KILL] tabId=$tabId session=$sessId view=$viewId url=$currUrl gen=$gen isOpen=$isOpen thread=$threadName elapsedRealtime=$now"
+        Log.e(TAG, killMsg)
+        com.remmi.browser.util.DebugLogManager.log(killMsg)
+
+        val recMsg = "[FORENSIC][CONTENT_RECOVERY_STATE] tabId=$tabId session=$sessId view=$viewId url=$currUrl gen=$gen isOpen=$isOpen action=NONE_RECORDED_ONLY elapsedRealtime=$now"
+        Log.w(TAG, recMsg)
+        com.remmi.browser.util.DebugLogManager.log(recMsg)
       }
 
       override fun onTitleChange(session: GeckoSession, title: String?) {
@@ -673,6 +748,36 @@ class GeckoEngineManager private constructor(private val context: Context) {
     }
   }
 
+  fun checkViewInvariants(targetTabId: String? = null, reason: String = "") {
+    val allTabIds = (activeSessions.keys + attachedViews.keys).distinct()
+    for (tId in allTabIds) {
+      val session = activeSessions[tId]
+      val sessId = session?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+      val view = attachedViews[tId]
+      val viewId = view?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+      val tag = view?.tag?.toString() ?: "null"
+      val url = lastDispatchedUrls[tId] ?: "none"
+      
+      val duplicateViewTabs = attachedViews.filter { it.value === view && view != null }.keys.toList()
+      val isMultiMapped = duplicateViewTabs.size > 1
+      
+      val invMsg = "[FORENSIC][VIEW_INVARIANT] tabId=$tId view=$viewId session=$sessId attachedOwner=$tId tag=$tag reason=$reason url=$url isMultiMapped=$isMultiMapped multiTabs=$duplicateViewTabs"
+      Log.i(TAG, invMsg)
+      com.remmi.browser.util.DebugLogManager.log(invMsg)
+      
+      if (isMultiMapped) {
+        val warnMsg = "[FORENSIC][VIEW_INVARIANT_VIOLATION] DUPLICATE_VIEW_MAPPING view=$viewId mappedTo=$duplicateViewTabs"
+        Log.e(TAG, warnMsg)
+        com.remmi.browser.util.DebugLogManager.log(warnMsg)
+      }
+      if (view != null && tag != tId) {
+        val warnMsg = "[FORENSIC][VIEW_INVARIANT_VIOLATION] TAG_MISMATCH tabId=$tId view=$viewId tag=$tag"
+        Log.w(TAG, warnMsg)
+        com.remmi.browser.util.DebugLogManager.log(warnMsg)
+      }
+    }
+  }
+
   suspend fun attachView(
     tabId: String,
     geckoView: GeckoView,
@@ -687,11 +792,16 @@ class GeckoEngineManager private constructor(private val context: Context) {
     
     val existingSession = activeSessions[tabId]
     val existingSessId = existingSession?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+    val gvId = "0x" + Integer.toHexString(System.identityHashCode(geckoView))
     val gen = navGenerations[tabId] ?: 0L
     val threadName = Thread.currentThread().name
-    val startMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_START] tabId=$tabId session=$existingSessId gen=$gen thread=$threadName"
+    val now = android.os.SystemClock.elapsedRealtime()
+    val currUrl = lastDispatchedUrls[tabId] ?: "none"
+    val startMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_START] tabId=$tabId session=$existingSessId view=$gvId gen=$gen url=$currUrl thread=$threadName elapsedRealtime=$now"
     Log.i(TAG, startMsg)
     com.remmi.browser.util.DebugLogManager.log(startMsg)
+    
+    checkViewInvariants(tabId, "ATTACH_START")
     
     if (_initState.value == GeckoInitState.NOT_STARTED) {
       Log.d(TAG, "[GECKO] attachView initializing runtime for tabId=$tabId")
@@ -711,13 +821,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
     val currentAttachedView = attachedViews[tabId]
     if (existingSession != null && existingSession.isOpen && currentAttachedView === geckoView && geckoView.session === existingSession) {
       val viewId = "0x" + Integer.toHexString(System.identityHashCode(geckoView))
-      val skipMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_SKIP_ALREADY_ATTACHED] tabId=$tabId session=$existingSessId view=$viewId gen=$gen reason=idempotency_match"
+      val skipMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_SKIP_ALREADY_ATTACHED] tabId=$tabId session=$existingSessId view=$viewId gen=$gen reason=idempotency_match elapsedRealtime=${android.os.SystemClock.elapsedRealtime()}"
       Log.i(TAG, skipMsg)
       com.remmi.browser.util.DebugLogManager.log(skipMsg)
       
       existingSession.setActive(true)
       _viewAttachmentStates.getOrPut(tabId) { MutableStateFlow(false) }.value = true
       dispatchPendingNavigationIfReady(tabId)
+      checkViewInvariants(tabId, "ATTACH_SKIP_IDEMPOTENT")
       return@withContext
     }
 
@@ -731,10 +842,11 @@ class GeckoEngineManager private constructor(private val context: Context) {
       attachedViews[tabId] = geckoView
       _viewAttachmentStates.getOrPut(tabId) { MutableStateFlow(false) }.value = true
 
-      val doneMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_DONE] tabId=$tabId session=$sessId gen=$gen thread=$threadName"
+      val doneMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_DONE] tabId=$tabId session=$sessId view=$gvId gen=$gen thread=$threadName elapsedRealtime=${android.os.SystemClock.elapsedRealtime()}"
       Log.i(TAG, doneMsg)
       com.remmi.browser.util.DebugLogManager.log(doneMsg)
 
+      checkViewInvariants(tabId, "ATTACH_DONE")
       dispatchPendingNavigationIfReady(tabId)
     } catch (e: Exception) {
       Log.w(TAG, "[GECKO] attachView error on tabId=$tabId: ${e.message}")
@@ -748,9 +860,12 @@ class GeckoEngineManager private constructor(private val context: Context) {
     assertMainThread("DETACH_VIEW id=$tabId")
     val session = activeSessions[tabId]
     val sessId = session?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+    val gvId = geckoView?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
     val gen = navGenerations[tabId] ?: 0L
     val threadName = Thread.currentThread().name
-    val detachMsg = "[FORENSIC] [GECKO_VIEW_DETACH] tabId=$tabId session=$sessId gen=$gen thread=$threadName"
+    val now = android.os.SystemClock.elapsedRealtime()
+    val currUrl = lastDispatchedUrls[tabId] ?: "none"
+    val detachMsg = "[FORENSIC] [GECKO_VIEW_DETACH] tabId=$tabId session=$sessId view=$gvId gen=$gen url=$currUrl thread=$threadName elapsedRealtime=$now"
     Log.i(TAG, detachMsg)
     com.remmi.browser.util.DebugLogManager.log(detachMsg)
 
@@ -762,13 +877,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
     } catch (e: Exception) {
       Log.w(TAG, "[GECKO] releaseSession error: ${e.message}")
     }
-    withSession(tabId, "DETACH_SET_INACTIVE") { session ->
+    withSession(tabId, "DETACH_SET_INACTIVE") { sessionObj ->
       try {
-        session.setActive(false)
+        sessionObj.setActive(false)
       } catch (e: Exception) {
         Log.w(TAG, "[GECKO] setActive(false) notice: ${e.message}")
       }
     }
+    checkViewInvariants(tabId, "DETACH_DONE")
   }
 
   suspend fun setTabActive(tabId: String, active: Boolean) = withContext(Dispatchers.Main.immediate) {

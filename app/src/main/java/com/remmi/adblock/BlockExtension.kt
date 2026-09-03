@@ -518,12 +518,18 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
             }
             "SHOULD_BLOCK" -> {
               val startTs = System.currentTimeMillis()
+              val startRealtime = android.os.SystemClock.elapsedRealtime()
               val sourceUrl = message.optString("sourceUrl")
               val initiator = message.optString("initiator")
               val method = message.optString("method", "GET")
               val aggressive = message.optBoolean("aggressive", false)
               val thirdParty = message.optBoolean("thirdParty", true)
               val resourceType = message.optString("resourceType", "other")
+              val tabId = message.optString("tabId")
+              val qSize = networkQueue.size
+
+              val reqMsg = "[FORENSIC][WEBEXT_REQ] requestId=$requestId tabId=$tabId url=$url method=$method type=$resourceType queueSize=$qSize elapsedRealtime=$startRealtime"
+              Log.d(TAG, reqMsg)
 
               val isTrace = url.contains("google-analytics") || 
                             url.contains("adblock-tester") || 
@@ -537,8 +543,16 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
 
               // Offload heavy Rust/JNI evaluation to dedicated network worker executor
               try {
+                val acceptMsg = "[FORENSIC][WEBEXT_QUEUE_ACCEPT] requestId=$requestId queueSize=$qSize elapsedRealtime=$startRealtime"
+                Log.d(TAG, acceptMsg)
+
                 networkExecutor.execute {
                   inflightDecisionCount.incrementAndGet()
+                  val wStartRealtime = android.os.SystemClock.elapsedRealtime()
+                  val workerThread = Thread.currentThread().name
+                  val wStartMsg = "[FORENSIC][WEBEXT_WORKER_START] requestId=$requestId thread=$workerThread queueSize=${networkQueue.size} elapsedRealtime=$wStartRealtime"
+                  Log.d(TAG, wStartMsg)
+
                   try {
                   val sourceHost = try {
                     if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
@@ -560,6 +574,10 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                     )
                   }
                   val endTs = System.currentTimeMillis()
+                  val wDoneRealtime = android.os.SystemClock.elapsedRealtime()
+                  val wElapsed = wDoneRealtime - wStartRealtime
+                  val wDoneMsg = "[FORENSIC][WEBEXT_WORKER_DONE] requestId=$requestId thread=$workerThread elapsed=$wElapsed ms blocked=${decision.blocked} rule=${decision.ruleId} elapsedRealtime=$wDoneRealtime"
+                  Log.d(TAG, wDoneMsg)
 
                   val resp = JSONObject().apply {
                     put("type", "SHOULD_BLOCK_RESULT")
@@ -583,6 +601,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
 
                   // Deliver on Main thread and verify port still active
                   mainHandler.post {
+                    val deliveryRealtime = android.os.SystemClock.elapsedRealtime()
                     synchronized(portLock) {
                       if (activePort != p) {
                         Log.w(TAG, "[PORT_STALE] Dropping response for stale/disconnected port")
@@ -591,6 +610,8 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                     }
                     try {
                       p.postMessage(resp)
+                      val respMsg = "[FORENSIC][WEBEXT_RESPONSE] requestId=$requestId cancel=${decision.blocked} elapsedRealtime=$deliveryRealtime"
+                      Log.d(TAG, respMsg)
                     } catch (e: Exception) {
                       Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$reqPortGen failed to send SHOULD_BLOCK_RESULT: ${e.message}")
                     }
@@ -604,7 +625,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 }
               }
               } catch (e: java.util.concurrent.RejectedExecutionException) {
-                Log.w(TAG, "[NETWORK_QUEUE_SATURATED] Rejecting SHOULD_BLOCK for $url. aggressive=$aggressive")
+                val rejectRealtime = android.os.SystemClock.elapsedRealtime()
+                val rejMsg = "[FORENSIC][WEBEXT_QUEUE_REJECT] requestId=$requestId queueSize=$qSize elapsedRealtime=$rejectRealtime"
+                Log.w(TAG, rejMsg)
+                com.remmi.browser.util.DebugLogManager.log(rejMsg)
+
                 val cancelRequest = aggressive // fail-closed if aggressive (GHOST/TOR), else fail-open
                 val resp = JSONObject().apply {
                   put("type", "SHOULD_BLOCK_RESULT")
@@ -624,14 +649,23 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 mainHandler.post {
                   synchronized(portLock) {
                     if (activePort == p) {
-                      try { p.postMessage(resp) } catch (ex: Exception) {}
+                      try {
+                        p.postMessage(resp)
+                        val respMsg = "[FORENSIC][WEBEXT_RESPONSE] requestId=$requestId cancel=$cancelRequest saturated=true elapsedRealtime=${android.os.SystemClock.elapsedRealtime()}"
+                        Log.d(TAG, respMsg)
+                      } catch (ex: Exception) {}
                     }
                   }
                 }
               }
             }
             "GET_COSMETIC_RESOURCES" -> {
+              val startRealtime = android.os.SystemClock.elapsedRealtime()
               val hostname = message.optString("hostname")
+              val queueDepth = cosmeticQueue.size
+              val reqMsg = "[FORENSIC][COSMETIC_REQ] type=GET_COSMETIC_RESOURCES requestId=$requestId host=$hostname queueDepth=$queueDepth elapsedRealtime=$startRealtime"
+              Log.d(TAG, reqMsg)
+
               val classesArray = message.optJSONArray("classes")
               val idsArray = message.optJSONArray("ids")
               val exceptionsArray = message.optJSONArray("exceptions")
@@ -653,8 +687,16 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
               inflightCosmeticCount.incrementAndGet()
 
               try {
+                val qMsg = "[FORENSIC][COSMETIC_QUEUE] requestId=$requestId queueDepth=$queueDepth elapsedRealtime=$startRealtime"
+                Log.d(TAG, qMsg)
+
                 cosmeticExecutor.execute {
                   try {
+                    val cStartRealtime = android.os.SystemClock.elapsedRealtime()
+                    val threadName = Thread.currentThread().name
+                    val startMsg = "[FORENSIC][COSMETIC_START] requestId=$requestId thread=$threadName queueDepth=${cosmeticQueue.size} elapsedRealtime=$cStartRealtime"
+                    Log.d(TAG, startMsg)
+
                     activeCosmeticTasks.incrementAndGet()
                     cosmeticStartedCount.incrementAndGet()
 
@@ -694,6 +736,9 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                     }
 
                     cosmeticCompletedCount.incrementAndGet()
+                    val cDoneRealtime = android.os.SystemClock.elapsedRealtime()
+                    val doneMsg = "[FORENSIC][COSMETIC_DONE] requestId=$requestId elapsed=${cDoneRealtime - cStartRealtime}ms elapsedRealtime=$cDoneRealtime"
+                    Log.d(TAG, doneMsg)
 
                     mainHandler.post {
                       synchronized(portLock) {
@@ -713,6 +758,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
               } catch (re: java.util.concurrent.RejectedExecutionException) {
                 cosmeticDroppedCount.incrementAndGet()
                 inflightCosmeticCount.decrementAndGet()
+                val dropRealtime = android.os.SystemClock.elapsedRealtime()
+                val dropMsg = "[FORENSIC][COSMETIC_DROP] requestId=$requestId queueDepth=${cosmeticQueue.size} elapsedRealtime=$dropRealtime"
+                Log.w(TAG, dropMsg)
+                com.remmi.browser.util.DebugLogManager.log(dropMsg)
+
                 val emptyResp = JSONObject().apply {
                   put("type", "COSMETIC_RESOURCES_RESULT")
                   put("ok", true)
@@ -732,6 +782,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
             }
             "GET_HIDDEN_CLASS_ID_SELECTORS" -> {
               val startTs = System.currentTimeMillis()
+              val startRealtime = android.os.SystemClock.elapsedRealtime()
+              val queueDepth = cosmeticQueue.size
+              val reqMsg = "[FORENSIC][COSMETIC_REQ] type=GET_HIDDEN_CLASS_ID_SELECTORS requestId=$requestId queueDepth=$queueDepth elapsedRealtime=$startRealtime"
+              Log.d(TAG, reqMsg)
+
               val classesArray = message.optJSONArray("classes")
               val idsArray = message.optJSONArray("ids")
               val exceptionsArray = message.optJSONArray("exceptions")
@@ -753,8 +808,16 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
               inflightCosmeticCount.incrementAndGet()
 
               try {
+                val qMsg = "[FORENSIC][COSMETIC_QUEUE] requestId=$requestId queueDepth=$queueDepth elapsedRealtime=$startRealtime"
+                Log.d(TAG, qMsg)
+
                 cosmeticExecutor.execute {
                   try {
+                    val cStartRealtime = android.os.SystemClock.elapsedRealtime()
+                    val threadName = Thread.currentThread().name
+                    val startMsg = "[FORENSIC][COSMETIC_START] requestId=$requestId thread=$threadName queueDepth=${cosmeticQueue.size} elapsedRealtime=$cStartRealtime"
+                    Log.d(TAG, startMsg)
+
                     activeCosmeticTasks.incrementAndGet()
                     cosmeticStartedCount.incrementAndGet()
 
@@ -777,6 +840,9 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                     }
 
                     cosmeticCompletedCount.incrementAndGet()
+                    val cDoneRealtime = android.os.SystemClock.elapsedRealtime()
+                    val doneMsg = "[FORENSIC][COSMETIC_DONE] requestId=$requestId elapsed=${cDoneRealtime - cStartRealtime}ms elapsedRealtime=$cDoneRealtime"
+                    Log.d(TAG, doneMsg)
 
                     mainHandler.post {
                       synchronized(portLock) {
@@ -796,6 +862,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
               } catch (re: java.util.concurrent.RejectedExecutionException) {
                 cosmeticDroppedCount.incrementAndGet()
                 inflightCosmeticCount.decrementAndGet()
+                val dropRealtime = android.os.SystemClock.elapsedRealtime()
+                val dropMsg = "[FORENSIC][COSMETIC_DROP] requestId=$requestId queueDepth=${cosmeticQueue.size} elapsedRealtime=$dropRealtime"
+                Log.w(TAG, dropMsg)
+                com.remmi.browser.util.DebugLogManager.log(dropMsg)
+
                 val emptyResp = JSONObject().apply {
                   put("type", "HIDDEN_SELECTORS_RESULT")
                   put("ok", true)
