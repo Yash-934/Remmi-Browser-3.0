@@ -13,6 +13,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -74,6 +75,7 @@ fun BrowserView(
   )
 
   var lastNavigatedUrl by remember(tab.id) { mutableStateOf("") }
+  val isViewAttached by geckoEngine.getViewAttachmentState(tab.id).collectAsState()
 
   // Callbacks bundle decoupled from GeckoSession
   val tabCallbacks = remember(tab.id, tab.profile) {
@@ -187,10 +189,16 @@ fun BrowserView(
   }
 
   // Handle URL navigation safely through GeckoEngineManager without feedback loops
-  LaunchedEffect(tab.url) {
-    if (tab.url.isNotBlank() && tab.url != "about:blank" && tab.url != "remmi://newtab" && tab.url != lastNavigatedUrl) {
+  // Invariant: ONLY loadUrl when view attachment is complete
+  LaunchedEffect(tab.url, isViewAttached) {
+    if (!isViewAttached) return@LaunchedEffect
+    if (tab.url.isNotBlank() && tab.url != lastNavigatedUrl) {
       lastNavigatedUrl = tab.url
-      geckoEngine.loadUrl(tab.id, tab.url)
+      if (tab.url == "about:blank" || tab.url == "remmi://newtab" || tab.url == "about:home") {
+        geckoEngine.resetToNewTab(tab.id)
+      } else {
+        geckoEngine.loadUrl(tab.id, tab.url)
+      }
     }
   }
 

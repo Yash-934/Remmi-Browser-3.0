@@ -61,6 +61,7 @@ class RemmiApp : Application(), SingletonImageLoader.Factory {
     // Initialize local storage and settings in background to keep startup instant
     val executor = Executors.newSingleThreadExecutor { r ->
       Thread(r, "RemmiApp-Init").apply {
+        isDaemon = true
         priority = Thread.MIN_PRIORITY
       }
     }

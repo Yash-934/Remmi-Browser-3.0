@@ -15,6 +15,7 @@ import com.remmi.browser.security.NetworkHardening
 import com.remmi.browser.security.PrivacyProfile
 import com.remmi.browser.security.SecurityLevel
 import com.remmi.browser.util.PdfPrintHelper
+import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -122,6 +123,46 @@ class GeckoEngineManager private constructor(private val context: Context) {
   private val sessionCallbacks = mutableMapOf<String, GeckoTabCallbacks>()
   private val sessionNavStates = mutableMapOf<String, Pair<Boolean, Boolean>>()
   private val mainHandler = Handler(Looper.getMainLooper())
+
+  data class PendingNavigation(
+    val url: String,
+    val generation: Long,
+  )
+
+  private val attachedViews = mutableMapOf<String, GeckoView>()
+  private val _viewAttachmentStates = mutableMapOf<String, MutableStateFlow<Boolean>>()
+  private val navGenerations = mutableMapOf<String, Long>()
+  private val pendingNavigations = mutableMapOf<String, PendingNavigation>()
+  private val lastDispatchedUrls = mutableMapOf<String, String>()
+  private val dispatchedNavigationsHistory = mutableMapOf<String, MutableList<String>>()
+
+  // Optional test hook for intercepting loadUri calls in JVM unit tests
+  internal var uriLoaderForTest: ((tabId: String, session: GeckoSession, url: String) -> Unit)? = null
+
+  fun getViewAttachmentState(tabId: String): StateFlow<Boolean> {
+    return _viewAttachmentStates.getOrPut(tabId) { MutableStateFlow(false) }.asStateFlow()
+  }
+
+  fun isViewAttached(tabId: String): Boolean {
+    val view = attachedViews[tabId] ?: return false
+    val session = activeSessions[tabId] ?: return false
+    return view.session == session
+  }
+
+  fun getPendingNavigation(tabId: String): String? = pendingNavigations[tabId]?.url
+  fun getLastDispatchedUrl(tabId: String): String? = lastDispatchedUrls[tabId]
+  fun getNavGeneration(tabId: String): Long = navGenerations[tabId] ?: 0L
+  fun getDispatchedNavigations(tabId: String): List<String> = dispatchedNavigationsHistory[tabId]?.toList() ?: emptyList()
+
+  @VisibleForTesting
+  internal fun setInitStateForTesting(state: GeckoInitState) {
+    _initState.value = state
+  }
+
+  @VisibleForTesting
+  internal fun setSessionForTesting(tabId: String, session: GeckoSession) {
+    activeSessions[tabId] = session
+  }
 
   private fun assertMainThread(operation: String) {
     val isMain = Looper.myLooper() == Looper.getMainLooper()
@@ -383,8 +424,8 @@ class GeckoEngineManager private constructor(private val context: Context) {
     assertMainThread("GET_OR_CREATE_INTERNAL id=$tabId")
     val existing = activeSessions[tabId]
     if (existing != null) {
-      if (existing.isOpen) {
-        Log.i(TAG, "[FORENSIC] GECKO_SESSION REUSED id=$tabId (isOpen=true)")
+      if (existing.isOpen || uriLoaderForTest != null) {
+        Log.i(TAG, "[FORENSIC] GECKO_SESSION REUSED id=$tabId (isOpen=${existing.isOpen})")
         return existing
       }
       Log.i(TAG, "[FORENSIC] GECKO_SESSION REPLACED id=$tabId (isOpen=false)")
@@ -597,6 +638,38 @@ class GeckoEngineManager private constructor(private val context: Context) {
 
   // --- View Attachment & Lifecycle Control ---
 
+  private fun dispatchPendingNavigationIfReady(tabId: String) {
+    assertMainThread("DISPATCH_PENDING id=$tabId")
+    val pending = pendingNavigations.remove(tabId) ?: return
+    val session = activeSessions[tabId] ?: return
+    val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
+    val threadName = Thread.currentThread().name
+    
+    if (lastDispatchedUrls[tabId] == pending.url) {
+      val skipMsg = "[FORENSIC] [GECKO_NAV_SKIPPED_DUPLICATE] tabId=$tabId session=$sessId gen=${pending.generation} url=${pending.url} thread=$threadName"
+      Log.i(TAG, skipMsg)
+      com.remmi.browser.util.DebugLogManager.log(skipMsg)
+      return
+    }
+    
+    lastDispatchedUrls[tabId] = pending.url
+    dispatchedNavigationsHistory.getOrPut(tabId) { mutableListOf() }.add(pending.url)
+    val dispatchMsg = "[FORENSIC] [GECKO_NAV_DISPATCH] tabId=$tabId session=$sessId gen=${pending.generation} url=${pending.url} thread=$threadName"
+    Log.i(TAG, dispatchMsg)
+    com.remmi.browser.util.DebugLogManager.log(dispatchMsg)
+    
+    try {
+      val testLoader = uriLoaderForTest
+      if (testLoader != null) {
+        testLoader(tabId, session, pending.url)
+      } else {
+        session.loadUri(pending.url)
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "[GECKO] dispatchPendingNavigation error on tabId=$tabId: ${e.message}")
+    }
+  }
+
   suspend fun attachView(
     tabId: String,
     geckoView: GeckoView,
@@ -609,23 +682,43 @@ class GeckoEngineManager private constructor(private val context: Context) {
     assertMainThread("ATTACH_VIEW id=$tabId")
     sessionCallbacks[tabId] = callbacks
     
-    // Do NOT initialize GeckoRuntime here. It should only happen in loadUrl for actual navigations.
+    val existingSession = activeSessions[tabId]
+    val existingSessId = existingSession?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+    val gen = navGenerations[tabId] ?: 0L
+    val threadName = Thread.currentThread().name
+    val startMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_START] tabId=$tabId session=$existingSessId gen=$gen thread=$threadName"
+    Log.i(TAG, startMsg)
+    com.remmi.browser.util.DebugLogManager.log(startMsg)
     
+    if (_initState.value == GeckoInitState.NOT_STARTED) {
+      Log.d(TAG, "[GECKO] attachView initializing runtime for tabId=$tabId")
+      initializeRuntimeAsync()
+    }
+
     if (_initState.value != GeckoInitState.READY) {
       Log.d(TAG, "[GECKO] attachView suspending for runtime readiness on tabId=$tabId")
       _initState.first { it == GeckoInitState.READY || it == GeckoInitState.FAILED }
     }
     
-    if (_initState.value == GeckoInitState.FAILED || runtime == null) {
+    if (_initState.value == GeckoInitState.FAILED || (runtime == null && uriLoaderForTest == null)) {
       Log.e(TAG, "[GECKO] attachView failed: runtime is not ready")
       return@withContext
     }
     val session = getOrCreateSessionInternal(tabId, profile, securityLevel, containerType, isDesktopMode)
+    val sessId = "0x" + Integer.toHexString(System.identityHashCode(session))
     try {
-      session.setActive(true)
       if (geckoView.session != session) {
         geckoView.setSession(session)
       }
+      session.setActive(true)
+      attachedViews[tabId] = geckoView
+      _viewAttachmentStates.getOrPut(tabId) { MutableStateFlow(false) }.value = true
+
+      val doneMsg = "[FORENSIC] [GECKO_VIEW_ATTACH_DONE] tabId=$tabId session=$sessId gen=$gen thread=$threadName"
+      Log.i(TAG, doneMsg)
+      com.remmi.browser.util.DebugLogManager.log(doneMsg)
+
+      dispatchPendingNavigationIfReady(tabId)
     } catch (e: Exception) {
       Log.w(TAG, "[GECKO] attachView error on tabId=$tabId: ${e.message}")
     }
@@ -636,6 +729,17 @@ class GeckoEngineManager private constructor(private val context: Context) {
     geckoView: GeckoView? = null,
   ) = withContext(Dispatchers.Main.immediate) {
     assertMainThread("DETACH_VIEW id=$tabId")
+    val session = activeSessions[tabId]
+    val sessId = session?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+    val gen = navGenerations[tabId] ?: 0L
+    val threadName = Thread.currentThread().name
+    val detachMsg = "[FORENSIC] [GECKO_VIEW_DETACH] tabId=$tabId session=$sessId gen=$gen thread=$threadName"
+    Log.i(TAG, detachMsg)
+    com.remmi.browser.util.DebugLogManager.log(detachMsg)
+
+    attachedViews.remove(tabId)
+    _viewAttachmentStates.getOrPut(tabId) { MutableStateFlow(false) }.value = false
+
     try {
       geckoView?.releaseSession()
     } catch (e: Exception) {
@@ -712,53 +816,77 @@ class GeckoEngineManager private constructor(private val context: Context) {
     assertMainThread("LOAD_URL id=$tabId")
     android.util.Log.i(TAG, "STATE_LOG: FIRST_PAGE_START (time=${android.os.SystemClock.elapsedRealtime()})")
     
+    val gen = (navGenerations[tabId] ?: 0L) + 1L
+    navGenerations[tabId] = gen
+    val session = activeSessions[tabId]
+    val sessId = session?.let { "0x" + Integer.toHexString(System.identityHashCode(it)) } ?: "none"
+    val threadName = Thread.currentThread().name
+
     if (_initState.value == GeckoInitState.NOT_STARTED) {
       Log.d(TAG, "[GECKO] loadUrl requesting init on tabId=$tabId")
       initializeRuntimeAsync()
     }
 
-    if (_initState.value == GeckoInitState.READY && runtime != null) {
-      val session = activeSessions[tabId] ?: run {
-        val profile = tab?.profile ?: currentProfile
-        val secLevel = tab?.securityLevel ?: SecurityLevel.STANDARD
-        val container = tab?.containerType ?: ContainerType.fromProfile(profile)
-        val isDesktop = tab?.isDesktopMode ?: false
-        getOrCreateSessionInternal(tabId, profile, secLevel, container, isDesktop)
-      }
-      try {
-        session.loadUri(targetUrl)
-      } catch (e: Exception) {
-        Log.w(TAG, "[GECKO] loadUrl error on tabId=$tabId: ${e.message}")
-      }
+    val isRuntimeReady = (_initState.value == GeckoInitState.READY && (runtime != null || uriLoaderForTest != null))
+    val isAttached = isViewAttached(tabId)
+
+    if (!isRuntimeReady || !isAttached) {
+      val queueMsg = "[FORENSIC] [GECKO_NAV_QUEUE] tabId=$tabId session=$sessId gen=$gen url=$targetUrl thread=$threadName"
+      Log.i(TAG, queueMsg)
+      com.remmi.browser.util.DebugLogManager.log(queueMsg)
+
+      // Store latest navigation only (replaces any previous pending navigation for this tab)
+      pendingNavigations[tabId] = PendingNavigation(targetUrl, gen)
       return
     }
 
-    // Await runtime readiness once via reactive StateFlow instead of polling
-    CoroutineScope(Dispatchers.Main.immediate).launch {
-      try {
-        val finalState = _initState.first { it == GeckoInitState.READY || it == GeckoInitState.FAILED }
-        if (finalState == GeckoInitState.READY && runtime != null) {
-          val currentTab = TabManager.getInstance().getTab(tabId)
-          val session = activeSessions[tabId] ?: run {
-            val profile = currentTab?.profile ?: currentProfile
-            val secLevel = currentTab?.securityLevel ?: SecurityLevel.STANDARD
-            val container = currentTab?.containerType ?: ContainerType.fromProfile(profile)
-            val isDesktop = currentTab?.isDesktopMode ?: false
-            getOrCreateSessionInternal(tabId, profile, secLevel, container, isDesktop)
-          }
-          session.loadUri(targetUrl)
-        } else {
-          Log.e(TAG, "[GECKO] loadUrl failed: runtime initialization failed for tabId=$tabId")
-        }
-      } catch (e: Exception) {
-        Log.w(TAG, "[GECKO] loadUrl coroutine error on tabId=$tabId: ${e.message}")
+    // View is attached and runtime is ready!
+    val currentSession = activeSessions[tabId] ?: run {
+      val profile = tab?.profile ?: currentProfile
+      val secLevel = tab?.securityLevel ?: SecurityLevel.STANDARD
+      val container = tab?.containerType ?: ContainerType.fromProfile(profile)
+      val isDesktop = tab?.isDesktopMode ?: false
+      getOrCreateSessionInternal(tabId, profile, secLevel, container, isDesktop)
+    }
+    val currentSessId = "0x" + Integer.toHexString(System.identityHashCode(currentSession))
+
+    if (lastDispatchedUrls[tabId] == targetUrl) {
+      val skipMsg = "[FORENSIC] [GECKO_NAV_SKIPPED_DUPLICATE] tabId=$tabId session=$currentSessId gen=$gen url=$targetUrl thread=$threadName"
+      Log.i(TAG, skipMsg)
+      com.remmi.browser.util.DebugLogManager.log(skipMsg)
+      return
+    }
+
+    lastDispatchedUrls[tabId] = targetUrl
+    pendingNavigations.remove(tabId)
+    dispatchedNavigationsHistory.getOrPut(tabId) { mutableListOf() }.add(targetUrl)
+    val dispatchMsg = "[FORENSIC] [GECKO_NAV_DISPATCH] tabId=$tabId session=$currentSessId gen=$gen url=$targetUrl thread=$threadName"
+    Log.i(TAG, dispatchMsg)
+    com.remmi.browser.util.DebugLogManager.log(dispatchMsg)
+
+    try {
+      val testLoader = uriLoaderForTest
+      if (testLoader != null) {
+        testLoader(tabId, currentSession, targetUrl)
+      } else {
+        currentSession.loadUri(targetUrl)
       }
+    } catch (e: Exception) {
+      Log.w(TAG, "[GECKO] loadUrl error on tabId=$tabId: ${e.message}")
     }
   }
 
   fun reload(tabId: String) {
     onMainSession(tabId, "RELOAD") { session ->
+      lastDispatchedUrls.remove(tabId)
       session.reload()
+    }
+  }
+
+  fun resetToNewTab(tabId: String) {
+    onMainSession(tabId, "RESET_TO_NEW_TAB") { session ->
+      Log.i(TAG, "[FORENSIC] NAV_NEW_TAB_TRANSITION tabId=$tabId")
+      session.load(GeckoSession.Loader().uri("about:blank").flags(GeckoSession.LOAD_FLAGS_REPLACE_HISTORY))
     }
   }
 
@@ -770,12 +898,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
 
   fun goBack(tabId: String) {
     onMainSession(tabId, "GO_BACK") { session ->
+      Log.i(TAG, "[FORENSIC] NAV_BACK_GECKO tabId=$tabId sessionHash=${session.hashCode()} thread=${Thread.currentThread().name}")
       session.goBack()
     }
   }
 
   fun goForward(tabId: String) {
     onMainSession(tabId, "GO_FORWARD") { session ->
+      Log.i(TAG, "[FORENSIC] NAV_FORWARD_GECKO tabId=$tabId sessionHash=${session.hashCode()} thread=${Thread.currentThread().name}")
       session.goForward()
     }
   }
@@ -839,6 +969,12 @@ class GeckoEngineManager private constructor(private val context: Context) {
     assertMainThread("CLOSE_SESSION_SAFELY id=$tabId")
     sessionCallbacks.remove(tabId)
     sessionNavStates.remove(tabId)
+    attachedViews.remove(tabId)
+    _viewAttachmentStates.remove(tabId)
+    pendingNavigations.remove(tabId)
+    lastDispatchedUrls.remove(tabId)
+    dispatchedNavigationsHistory.remove(tabId)
+    navGenerations.remove(tabId)
     val session = activeSessions.remove(tabId)
     if (session == null) {
       Log.d(TAG, "[GECKO] operation=CLOSE_NOT_FOUND id=$tabId thread=main")
@@ -849,7 +985,9 @@ class GeckoEngineManager private constructor(private val context: Context) {
       session.navigationDelegate = null
       session.progressDelegate = null
       session.contentDelegate = null
-      session.close()
+      if (session.isOpen) {
+        session.close()
+      }
       Log.d(TAG, "[GECKO] operation=CLOSE_COMPLETED id=$tabId thread=main")
       CloseResult.Success
     } catch (t: Throwable) {
@@ -862,6 +1000,12 @@ class GeckoEngineManager private constructor(private val context: Context) {
     assertMainThread("CLOSE_ALL")
     sessionCallbacks.clear()
     sessionNavStates.clear()
+    attachedViews.clear()
+    _viewAttachmentStates.clear()
+    pendingNavigations.clear()
+    lastDispatchedUrls.clear()
+    dispatchedNavigationsHistory.clear()
+    navGenerations.clear()
     val sessionsToClose = activeSessions.values.toList()
     activeSessions.clear()
     sessionsToClose.forEach { session ->
@@ -869,7 +1013,9 @@ class GeckoEngineManager private constructor(private val context: Context) {
         session.navigationDelegate = null
         session.progressDelegate = null
         session.contentDelegate = null
-        session.close()
+        if (session.isOpen) {
+          session.close()
+        }
       } catch (e: Exception) {
         Log.w(TAG, "[GECKO] operation=CLOSE_ALL_NOTICE: ${e.message}")
       }
@@ -887,6 +1033,12 @@ class GeckoEngineManager private constructor(private val context: Context) {
       // 1. Clear callbacks and delegates
       sessionCallbacks.clear()
       sessionNavStates.clear()
+      attachedViews.clear()
+      _viewAttachmentStates.clear()
+      pendingNavigations.clear()
+      lastDispatchedUrls.clear()
+      dispatchedNavigationsHistory.clear()
+      navGenerations.clear()
 
       // 2. Stop all running sessions and close
       val sessions = activeSessions.values.toList()
@@ -905,7 +1057,9 @@ class GeckoEngineManager private constructor(private val context: Context) {
           session.progressDelegate = null
           session.contentDelegate = null
           session.setActive(false)
-          session.close()
+          if (session.isOpen) {
+            session.close()
+          }
         } catch (e: Exception) {
           Log.w(TAG, "[GECKO] destroyAllBrowserState session close notice: ${e.message}")
           allSessionsClosed = false

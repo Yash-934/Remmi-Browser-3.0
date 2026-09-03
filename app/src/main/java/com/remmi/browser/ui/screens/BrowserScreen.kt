@@ -1,6 +1,7 @@
 package com.remmi.browser.ui.screens
 
 import androidx.activity.compose.BackHandler
+import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -493,8 +494,10 @@ fun BrowserScreen(
     } else if (activeTab.isReaderMode) {
       tabManager.toggleReaderMode(activeTab.id)
     } else if (activeTab.canGoBack) {
+      Log.i("BrowserScreen", "[FORENSIC] NAV_BACK_REQUEST tabId=${activeTab.id} action=GO_BACK url=${activeTab.url}")
       geckoEngine.goBack(activeTab.id)
-    } else if (activeTab.url != "about:blank" && activeTab.url.isNotBlank()) {
+    } else if (activeTab.url != "about:blank" && activeTab.url != "remmi://newtab" && activeTab.url.isNotBlank()) {
+      Log.i("BrowserScreen", "[FORENSIC] NAV_BACK_NO_HISTORY tabId=${activeTab.id} action=RESET_TO_NEW_TAB url=${activeTab.url}")
       // If on a loaded website with no back history in session, go back to New Tab page
       tabManager.updateTab(activeTab.id) {
         it.copy(url = "about:blank", title = "New Tab", canGoBack = false, canGoForward = false, isReaderMode = false, isSecure = true, readerArticle = null)

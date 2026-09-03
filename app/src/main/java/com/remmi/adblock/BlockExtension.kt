@@ -105,6 +105,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     networkQueue,
     { r ->
       Thread(r, "AdblockNetworkWorker").apply {
+        isDaemon = true
         priority = Thread.NORM_PRIORITY
       }
     },
@@ -121,6 +122,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     cosmeticQueue,
     { r ->
       Thread(r, "AdblockCosmeticWorker").apply {
+        isDaemon = true
         priority = Thread.MIN_PRIORITY
       }
     },

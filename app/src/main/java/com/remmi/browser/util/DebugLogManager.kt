@@ -40,6 +40,7 @@ object DebugLogManager {
 
   private val backgroundWriter = Executors.newSingleThreadScheduledExecutor { r ->
     Thread(r, "DebugLogWriter").apply {
+      isDaemon = true
       priority = Thread.MIN_PRIORITY
     }
   }
