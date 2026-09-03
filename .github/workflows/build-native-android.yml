@@ -104,6 +104,37 @@ jobs:
         done
         echo "SUCCESS: All native libraries in APK(s) match freshly compiled binaries."
 
+    - name: Cache Robolectric Android-All JARs
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository/org/robolectric/android-all-instrumented
+        key: robolectric-android-all-jars-v1
+
+    - name: Pre-fetch Robolectric Android-All JARs
+      run: |
+        rm -f ~/.m2/settings.xml
+        M2_DIR="$HOME/.m2/repository/org/robolectric/android-all-instrumented"
+        
+        # SDK 34 (Android 14)
+        SDK34_DIR="$M2_DIR/14-robolectric-10818077-i7"
+        if [ ! -f "$SDK34_DIR/android-all-instrumented-14-robolectric-10818077-i7.jar" ]; then
+          mkdir -p "$SDK34_DIR"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/14-robolectric-10818077-i7/android-all-instrumented-14-robolectric-10818077-i7.pom" -o "$SDK34_DIR/android-all-instrumented-14-robolectric-10818077-i7.pom"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/14-robolectric-10818077-i7/android-all-instrumented-14-robolectric-10818077-i7.pom.sha512" -o "$SDK34_DIR/android-all-instrumented-14-robolectric-10818077-i7.pom.sha512"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/14-robolectric-10818077-i7/android-all-instrumented-14-robolectric-10818077-i7.jar.sha512" -o "$SDK34_DIR/android-all-instrumented-14-robolectric-10818077-i7.jar.sha512"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/14-robolectric-10818077-i7/android-all-instrumented-14-robolectric-10818077-i7.jar" -o "$SDK34_DIR/android-all-instrumented-14-robolectric-10818077-i7.jar"
+        fi
+
+        # SDK 33 (Android 13)
+        SDK33_DIR="$M2_DIR/13-robolectric-9030017-i7"
+        if [ ! -f "$SDK33_DIR/android-all-instrumented-13-robolectric-9030017-i7.jar" ]; then
+          mkdir -p "$SDK33_DIR"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/13-robolectric-9030017-i7/android-all-instrumented-13-robolectric-9030017-i7.pom" -o "$SDK33_DIR/android-all-instrumented-13-robolectric-9030017-i7.pom"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/13-robolectric-9030017-i7/android-all-instrumented-13-robolectric-9030017-i7.pom.sha512" -o "$SDK33_DIR/android-all-instrumented-13-robolectric-9030017-i7.pom.sha512"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/13-robolectric-9030017-i7/android-all-instrumented-13-robolectric-9030017-i7.jar.sha512" -o "$SDK33_DIR/android-all-instrumented-13-robolectric-9030017-i7.jar.sha512"
+          curl -sSL -A "Mozilla/5.0" "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/13-robolectric-9030017-i7/android-all-instrumented-13-robolectric-9030017-i7.jar" -o "$SDK33_DIR/android-all-instrumented-13-robolectric-9030017-i7.jar"
+        fi
+
     - name: Run Unit Tests
       run: ./gradlew testDebugUnitTest
 

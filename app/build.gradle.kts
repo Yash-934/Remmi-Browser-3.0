@@ -91,6 +91,9 @@ android {
       isIncludeAndroidResources = true
       all {
         it.maxHeapSize = "2g"
+        it.systemProperty("robolectric.dependency.repo.url", "https://repo1.maven.org/maven2")
+        it.systemProperty("robolectric.dependency.repo.id", "Central")
+        it.systemProperty("http.agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
       }
     }
   }
