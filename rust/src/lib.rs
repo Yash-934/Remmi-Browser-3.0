@@ -1,3 +1,63 @@
+extern "C" {
+    fn __android_log_print(prio: std::os::raw::c_int, tag: *const std::os::raw::c_char, fmt: *const std::os::raw::c_char, ...) -> std::os::raw::c_int;
+    fn gettid() -> i32;
+}
+
+fn log_checkpoint(name: &str) {
+    let pid = std::process::id();
+    let tid = unsafe { gettid() };
+    let time_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as u64,
+        Err(_) => 0,
+    };
+    let mut rss_pages: usize = 0;
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(rss_str) = contents.split_whitespace().nth(1) {
+            if let Ok(p) = rss_str.parse::<usize>() {
+                rss_pages = p;
+            }
+        }
+    }
+    let rss_mb = (rss_pages * 4096) / (1024 * 1024);
+
+    let mut pss_kb: u64 = 0;
+    if let Ok(smaps) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+        for line in smaps.lines() {
+            if line.starts_with("Pss:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(k) = parts[1].parse::<u64>() {
+                        pss_kb = k;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let pss_mb = pss_kb / 1024;
+
+    let tag = b"AdblockNative\0";
+    let fmt = b"[NATIVE_CHECKPOINT] %s | timestamp=%llu | pid=%u | tid=%d | rss=%zuMB | pss=%lluMB\n\0";
+    let mut name_buf = [0u8; 64];
+    let name_bytes = name.as_bytes();
+    let copy_len = std::cmp::min(name_bytes.len(), 63);
+    name_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    unsafe {
+        __android_log_print(
+            4, // ANDROID_LOG_INFO
+            tag.as_ptr() as *const std::os::raw::c_char,
+            fmt.as_ptr() as *const std::os::raw::c_char,
+            name_buf.as_ptr() as *const std::os::raw::c_char,
+            time_ms,
+            pid,
+            tid,
+            rss_mb,
+            pss_mb,
+        );
+    }
+}
+
 use std::collections::HashSet;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -270,18 +330,21 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
     additional_rules_text: JString,
 ) -> jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        log_checkpoint("CP01_ENTER");
         let default_str: String = match env.get_string(&default_rules_text) {
             Ok(s) => s.into(),
             Err(_) => String::new(),
         };
+        log_checkpoint("CP02_AFTER_DEFAULT_STRING");
         let additional_str: String = match env.get_string(&additional_rules_text) {
             Ok(s) => s.into(),
             Err(_) => String::new(),
         };
-
+        log_checkpoint("CP03_AFTER_ADDITIONAL_STRING");
         let default_lines: Vec<&str> = default_str.lines().collect();
+        log_checkpoint("CP04_AFTER_DEFAULT_LINES");
         let additional_lines: Vec<&str> = additional_str.lines().collect();
-        
+        log_checkpoint("CP05_AFTER_ADDITIONAL_LINES");
         let default_valid_count = default_lines
             .iter()
             .filter(|line| !line.trim().is_empty() && !line.starts_with('!'))
@@ -298,7 +361,8 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
                 "engineGeneration": 0,
                 "activeEnginePresence": false
             });
-            let out_json = serde_json::to_string(&metrics).unwrap_or_default();
+            log_checkpoint("CP12_EXIT");
+        let out_json = serde_json::to_string(&metrics).unwrap_or_default();
             return match env.new_string(&out_json) {
                 Ok(s) => s.into_raw(),
                 Err(_) => std::ptr::null_mut(),
@@ -307,12 +371,14 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
 
         let mut default_filter_set = FilterSet::new(true);
         default_filter_set.add_filters(&default_lines, ParseOptions::default());
+        log_checkpoint("CP06_AFTER_DEFAULT_FILTERSET");
         let new_default_engine = Engine::from_filter_set(default_filter_set, true);
-
+        log_checkpoint("CP07_AFTER_DEFAULT_ENGINE");
         let mut additional_filter_set = FilterSet::new(true);
         if additional_valid_count > 0 {
             additional_filter_set.add_filters(&additional_lines, ParseOptions::default());
         }
+        log_checkpoint("CP08_AFTER_ADDITIONAL_FILTERSET");
         let new_additional_engine = if additional_valid_count > 0 {
             Some(Engine::from_filter_set(additional_filter_set, true))
         } else {
@@ -321,13 +387,15 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
 
         let total_count = (default_valid_count + additional_valid_count) as u64;
         let mut new_gen = 0;
-        
+        log_checkpoint("CP09_AFTER_ADDITIONAL_ENGINE");
+        log_checkpoint("CP10_BEFORE_SWAP");
         if let Ok(mut guard) = GLOBAL_STATE.engines.write() {
             guard.default_engine = Some(new_default_engine);
             guard.additional_engine = new_additional_engine;
             guard.generation += 1;
             new_gen = guard.generation;
         }
+        log_checkpoint("CP11_AFTER_SWAP");
 
         GLOBAL_STATE.filter_count.store(total_count, Ordering::SeqCst);
         println!("[ADBLOCK_ENGINE_SWAP] newGeneration={} rules={}", new_gen, total_count);
@@ -343,6 +411,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
         // We will just return total_count as jint for now, or change the return type.
         // Since Kotlin expects Int, we will leave it as returning jint,
         // and Kotlin will just return that as compiledCount.
+        log_checkpoint("CP12_EXIT");
         let out_json = serde_json::to_string(&metrics).unwrap_or_default();
         match env.new_string(&out_json) {
             Ok(s) => s.into_raw(),
