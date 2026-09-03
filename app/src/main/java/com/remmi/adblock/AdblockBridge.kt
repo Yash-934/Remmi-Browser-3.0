@@ -207,6 +207,22 @@ class AdblockBridge {
   val totalBlockedCount = AtomicInteger(0)
   private val localEngineGeneration = AtomicLong(1L)
 
+  private val postSwapScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+    Thread(r, "RemmiPostSwapMem").apply {
+      isDaemon = true
+      priority = Thread.MIN_PRIORITY
+    }
+  }
+
+  fun getCompileMemoryStats(): String {
+    val snap = com.remmi.browser.util.ProcessMemoryTelemetry.captureSnapshot()
+    val rssMb = snap.rssBytes / (1024 * 1024)
+    val pssMb = snap.pssBytes / (1024 * 1024)
+    val javaMb = snap.javaHeapUsedBytes / (1024 * 1024)
+    val nativeMb = snap.nativeHeapAllocatedBytes / (1024 * 1024)
+    return "rss=${rssMb}MB pss=${pssMb}MB javaHeap=${javaMb}MB nativeHeap=${nativeMb}MB ${com.remmi.browser.util.HangWatchdog.getMemoryStats()}"
+  }
+
   var isNativeLoaded: Boolean = false
     private set
 
@@ -689,7 +705,7 @@ class AdblockBridge {
         var compiledCount = 0
         val oldGen = getEngineGeneration()
 
-        val compileStartMsg = "[COMPILE_START] jobId=$jobId inputBytes=$totalInputBytes defaultBytes=$defaultBytes additionalBytes=$additionalBytes inputLines=$inputLines activeCompileJobs=$activeJobs ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} sessionId=$sess processPid=$pid"
+        val compileStartMsg = "[COMPILE_START] jobId=$jobId inputBytes=$totalInputBytes defaultBytes=$defaultBytes additionalBytes=$additionalBytes inputLines=$inputLines activeCompileJobs=$activeJobs ${getCompileMemoryStats()} sessionId=$sess processPid=$pid"
         Log.i(TAG, compileStartMsg)
         com.remmi.browser.util.DebugLogManager.log(compileStartMsg)
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_START]")
@@ -703,12 +719,12 @@ class AdblockBridge {
               com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_PARSE_DONE]")
               val metricsObj = org.json.JSONObject(metricsJson)
               compiledCount = metricsObj.optInt("parsedCandidates", 0)
-              val parseDoneMsg = "[COMPILE_PARSE_DONE] parsedRules=$compiledCount ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+              val parseDoneMsg = "[COMPILE_PARSE_DONE] parsedRules=$compiledCount ${getCompileMemoryStats()} jobId=$jobId"
               Log.i(TAG, parseDoneMsg)
               com.remmi.browser.util.DebugLogManager.log(parseDoneMsg)
               Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
               com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_ENGINE_CREATED]")
-              val engineCreatedMsg = "[COMPILE_ENGINE_CREATED] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+              val engineCreatedMsg = "[COMPILE_ENGINE_CREATED] ${getCompileMemoryStats()} jobId=$jobId"
               Log.i(TAG, engineCreatedMsg)
               com.remmi.browser.util.DebugLogManager.log(engineCreatedMsg)
               com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
@@ -907,10 +923,22 @@ class AdblockBridge {
           }
 
           com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
-          val swapDoneMsg = "[COMPILE_SWAP_DONE] ${com.remmi.browser.util.HangWatchdog.getMemoryStats()} jobId=$jobId"
+          val swapDoneMsg = "[COMPILE_SWAP_DONE] ${getCompileMemoryStats()} jobId=$jobId"
           Log.i(TAG, swapDoneMsg)
           com.remmi.browser.util.DebugLogManager.log(swapDoneMsg)
           Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
+
+          val currentJobId = jobId
+          postSwapScheduler.schedule({
+            val snap = com.remmi.browser.util.ProcessMemoryTelemetry.captureSnapshot()
+            val rssMb = snap.rssBytes / (1024 * 1024)
+            val pssMb = snap.pssBytes / (1024 * 1024)
+            val javaMb = snap.javaHeapUsedBytes / (1024 * 1024)
+            val nativeMb = snap.nativeHeapAllocatedBytes / (1024 * 1024)
+            val postSwapMsg = "[COMPILE_POST_SWAP_MEMORY] jobId=$currentJobId elapsedSinceSwapMs=3000ms rss=${rssMb}MB pss=${pssMb}MB javaHeap=${javaMb}MB nativeHeap=${nativeMb}MB ${com.remmi.browser.util.HangWatchdog.getMemoryStats()}"
+            Log.i(TAG, postSwapMsg)
+            com.remmi.browser.util.DebugLogManager.log(postSwapMsg)
+          }, 3000L, java.util.concurrent.TimeUnit.MILLISECONDS)
 
           val totalElapsed = android.os.SystemClock.elapsedRealtime() - compileStartRealtime
           watchdogHandle.stop(totalElapsed)
