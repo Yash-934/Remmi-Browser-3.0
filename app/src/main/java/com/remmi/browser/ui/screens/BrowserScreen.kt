@@ -565,16 +565,6 @@ fun BrowserScreen(
             val sanitized = NetworkHardening.sanitizeUrl(target)
             tabManager.updateTab(activeTab.id) { it.copy(url = sanitized, isReaderMode = false, readerArticle = null) }
             if (activeTab.profile != PrivacyProfile.GHOST && activeTab.profile != PrivacyProfile.INCOGNITO) {
-              scope.launch(Dispatchers.IO) {
-                val db = RemmiDatabase.getDatabaseAsync(context)
-                db.historyDao().insert(
-                  HistoryItem(
-                    url = sanitized,
-                    title = sanitized,
-                    profile = activeTab.profile.name,
-                  )
-                )
-              }
             }
           },
           onReload = { geckoEngine.reload(activeTab.id) },
@@ -763,34 +753,10 @@ fun BrowserScreen(
               }
               val targetUrl = String.format(engine.searchUrlFormat, encoded)
               tabManager.updateTab(activeTab.id) { it.copy(url = targetUrl, isReaderMode = false, readerArticle = null) }
-              if (activeTab.profile != PrivacyProfile.GHOST && activeTab.profile != PrivacyProfile.INCOGNITO) {
-                scope.launch(Dispatchers.IO) {
-                  val db = RemmiDatabase.getDatabaseAsync(context)
-                  db.historyDao().insert(
-                    HistoryItem(
-                      url = targetUrl,
-                      title = "$query - ${engine.displayName}",
-                      profile = activeTab.profile.name
-                    )
-                  )
-                }
-              }
             },
             onNavigate = { target ->
               val sanitized = NetworkHardening.sanitizeUrl(target)
               tabManager.updateTab(activeTab.id) { it.copy(url = sanitized, isReaderMode = false, readerArticle = null) }
-              if (activeTab.profile != PrivacyProfile.GHOST && activeTab.profile != PrivacyProfile.INCOGNITO) {
-                scope.launch(Dispatchers.IO) {
-                  val db = RemmiDatabase.getDatabaseAsync(context)
-                  db.historyDao().insert(
-                    HistoryItem(
-                      url = sanitized,
-                      title = sanitized,
-                      profile = activeTab.profile.name
-                    )
-                  )
-                }
-              }
             },
             onSelectSearchEngine = { engine ->
               settingsRepo.updateSearchEngine(engine.displayName)
@@ -845,7 +811,7 @@ fun BrowserScreen(
               if (activeTab.profile != PrivacyProfile.GHOST && activeTab.profile != PrivacyProfile.INCOGNITO) {
                 scope.launch(Dispatchers.IO) {
                   val db = RemmiDatabase.getDatabaseAsync(context)
-                  db.historyDao().insert(
+                  db.historyDao().insertIfNotDuplicate(
                     HistoryItem(
                       url = newUrl,
                       title = activeTab.title,

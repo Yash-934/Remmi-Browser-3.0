@@ -136,9 +136,9 @@
         })
         .catch((_e) => {
           isInflight = false;
-          if (pendingClassesSet.size > 0 || pendingIdsSet.size > 0) {
-            scheduleScan();
-          }
+          // Clear pending to prevent infinite retry loops on timeout
+          pendingClassesSet.clear();
+          pendingIdsSet.clear();
         });
     } catch (_e) {
       isInflight = false;

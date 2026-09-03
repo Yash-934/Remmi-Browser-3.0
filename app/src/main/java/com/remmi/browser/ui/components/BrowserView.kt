@@ -287,9 +287,13 @@ fun BrowserView(
         update = { geckoView ->
           geckoViewRef = geckoView
           if (geckoView.tag != tab.id) {
+            val oldTabId = geckoView.tag as? String
             geckoView.tag = tab.id
             geckoView.visibility = View.VISIBLE
             scope.launch {
+              if (oldTabId != null) {
+                geckoEngine.detachView(oldTabId, geckoView)
+              }
               geckoEngine.attachView(
                 tabId = tab.id,
                 geckoView = geckoView,
@@ -303,11 +307,12 @@ fun BrowserView(
           }
         },
         onRelease = { geckoView ->
+          val currentTag = geckoView.tag as? String ?: tab.id
           com.remmi.browser.engine.TabThumbnailManager.getInstance(context).captureGeckoView(tab.id, geckoView)
           geckoViewRef = null
           geckoView.tag = null
           scope.launch {
-            geckoEngine.detachView(tab.id, geckoView)
+            geckoEngine.detachView(currentTag, geckoView)
           }
         },
         modifier = Modifier

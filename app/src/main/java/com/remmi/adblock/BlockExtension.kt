@@ -109,7 +109,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
         priority = Thread.NORM_PRIORITY
       }
     },
-    java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy()
+    java.util.concurrent.ThreadPoolExecutor.AbortPolicy()
   )
 
   private val MAX_COSMETIC_QUEUE_CAPACITY = 16
@@ -536,9 +536,10 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
               }
 
               // Offload heavy Rust/JNI evaluation to dedicated network worker executor
-              inflightDecisionCount.incrementAndGet()
-              networkExecutor.execute {
-                try {
+              try {
+                networkExecutor.execute {
+                  inflightDecisionCount.incrementAndGet()
+                  try {
                   val sourceHost = try {
                     if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
                   } catch (_: Exception) { null }
@@ -600,6 +601,32 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                   }
                 } finally {
                   inflightDecisionCount.decrementAndGet()
+                }
+              }
+              } catch (e: java.util.concurrent.RejectedExecutionException) {
+                Log.w(TAG, "[NETWORK_QUEUE_SATURATED] Rejecting SHOULD_BLOCK for $url. aggressive=$aggressive")
+                val cancelRequest = aggressive // fail-closed if aggressive (GHOST/TOR), else fail-open
+                val resp = JSONObject().apply {
+                  put("type", "SHOULD_BLOCK_RESULT")
+                  put("ok", true)
+                  put("cancel", cancelRequest)
+                  put("ruleId", if (cancelRequest) "queue_saturated_fail_closed" else "queue_saturated_fail_open")
+                  put("ruleSource", "AdblockQueue")
+                  put("generation", reqPortGen)
+                  put("requestId", requestId)
+                  put("portGeneration", reqPortGen)
+                  put("jsInstanceId", jsInstanceId)
+                  put("instanceId", instId)
+                  put("nativeStartTimestamp", startTs)
+                  put("nativeEndTimestamp", System.currentTimeMillis())
+                  put("responseDeliveryTimestamp", System.currentTimeMillis())
+                }
+                mainHandler.post {
+                  synchronized(portLock) {
+                    if (activePort == p) {
+                      try { p.postMessage(resp) } catch (ex: Exception) {}
+                    }
+                  }
                 }
               }
             }

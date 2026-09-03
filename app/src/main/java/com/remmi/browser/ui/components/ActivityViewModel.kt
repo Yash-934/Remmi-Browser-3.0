@@ -293,13 +293,16 @@ class ActivityViewModel(
 
     fun updateBookmark(id: Long, title: String, url: String, category: String) {
         viewModelScope.launch {
-            bookmarkDao.update(BookmarkItem(id = id, title = title, url = url, category = category))
+            val current = allBookmarks.value.find { it.id == id }
+            if (current != null) {
+                bookmarkDao.insert(current.copy(title = title, url = url, category = category))
+            }
         }
     }
 
     fun moveBookmark(item: BookmarkItem, newFolder: String) {
         viewModelScope.launch {
-            bookmarkDao.update(item.copy(category = newFolder))
+            bookmarkDao.insert(item.copy(category = newFolder))
         }
     }
 
